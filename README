@@ -1,0 +1,21 @@
+File Naming and Batch Detection Guidelines
+
+File Naming for 2D vs 3D Images
+SampleName_Markers_(optional:3D)_(optional:Location).tif
+
+2D images:
+SampleName_Markers.tif
+3D z-stacks:
+SampleName_Markers_3D_location.tif
+
+The pipeline will automatically detect 3D images if the filename contains 3D (case-insensitive) before the file extension.
+
+If present, the location tag (e.g., SampleName_Markers_3D_Location1.tif) indicates a zoomed-in region, often for 3D images.
+The pipeline will use the corresponding 2D files (with the same sample name and markers, but without the location tag) as the reference for each 3D location.
+If no location tag is present, the file is assumed to cover the whole sample.
+
+
+Batch Detection
+A "batch" is defined as a set of files with different sample names (the part before the first underscore).
+If all files share the same sample name, the pipeline will treat them as a single sample (not a batch).
+Please follow these conventions to ensure correct processing.
