@@ -95,6 +95,48 @@ def resize_to_shape(
     return out.astype(bool) if is_mask else out.astype(np.float32)
 
 
+def center_on_canvas(
+    img: np.ndarray,
+    canvas_shape: Tuple[int, int],
+    is_mask: bool = False,
+) -> Tuple[np.ndarray, Tuple[int, int]]:
+    """
+    Place an image centered on a larger canvas.
+    
+    Useful for aligning images of different sizes by padding with zeros
+    before registration on a uniform canvas.
+    
+    Parameters
+    ----------
+    img : 2D array
+        Input image to center
+    canvas_shape : tuple
+        (canvas_height, canvas_width) of the output
+    is_mask : bool
+        If True, treats img as binary mask
+    
+    Returns
+    -------
+    canvas : 2D array
+        Output canvas with centered image
+    offset : tuple
+        (top, left) offset where the image was placed
+    """
+    canvas_h, canvas_w = canvas_shape
+    h, w = img.shape
+    top = (canvas_h - h) // 2
+    left = (canvas_w - w) // 2
+
+    if is_mask:
+        canvas = np.zeros((canvas_h, canvas_w), dtype=bool)
+        canvas[top:top + h, left:left + w] = img.astype(bool)
+    else:
+        canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+        canvas[top:top + h, left:left + w] = img.astype(np.float32)
+
+    return canvas, (top, left)
+
+
 # ============================================================================
 # TISSUE PROCESSOR
 # ============================================================================
@@ -280,7 +322,8 @@ def compute_weighted_ncc(
     if ref_var <= 0 or mov_var <= 0:
         return 0.0
 
-    return float(min(1.0, numerator / np.sqrt(ref_var * mov_var)))
+    ncc = numerator / np.sqrt(ref_var * mov_var)
+    return float(max(0.0, min(1.0, ncc)))
 
 
 def score_transform(

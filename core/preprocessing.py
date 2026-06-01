@@ -73,6 +73,10 @@ def apply_clahe(
     return clahe.apply(img_u8)
 
 
+def apply_clahe_u8(img_u8: np.ndarray) -> np.ndarray:
+    return apply_clahe(img_u8, clip_limit=3.0, tile_grid_size=(8, 8))
+
+
 # ============================================================================
 # GPU PREPROCESSING
 # ============================================================================

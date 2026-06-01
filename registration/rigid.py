@@ -46,7 +46,9 @@ from align.core.tissue import (
 )
 from align.core.transforms import (
     compose,
+    compose_affine,
     identity,
+    scale_affine_translation,
     scale_translation_only,
     upscale_to_full,
     warp_affine,
@@ -169,8 +171,25 @@ class FeatureBasedRegistration:
     Runs detection on ref and mov in parallel via ThreadPoolExecutor.
     """
 
-    def __init__(self, max_features: int = 15000) -> None:
-        self.max_features = max_features
+    def __init__(self, max_features: int = 15000, config: object = None) -> None:
+        """
+        Initialize feature-based registrar.
+        
+        Parameters
+        ----------
+        max_features : int, default 15000
+            Maximum number of features to detect
+        config : object, optional
+            Config object (RegistrationConfig or ZStackConfig) with max_features attribute.
+            If provided, overrides max_features parameter.
+        """
+        if hasattr(max_features, "max_features") and config is None:
+            config = max_features
+
+        if config is not None and hasattr(config, 'max_features'):
+            self.max_features = config.max_features
+        else:
+            self.max_features = max_features
 
     def register(
         self,
@@ -195,10 +214,8 @@ class FeatureBasedRegistration:
         # SIFT with ORB fallback (ORB is available in all OpenCV builds)
         try:
             detector = cv2.SIFT_create(nfeatures=self.max_features)
-            use_l2   = True
-        except AttributeError:
+        except Exception:
             detector = cv2.ORB_create(nfeatures=min(self.max_features, 20000))
-            use_l2   = False
 
         def _detect(img, mask):
             return detector.detectAndCompute(img, mask)
@@ -213,7 +230,7 @@ class FeatureBasedRegistration:
             logger.debug("Not enough keypoints for feature matching")
             return identity(), 0.0
 
-        norm   = cv2.NORM_L2 if use_l2 else cv2.NORM_HAMMING
+        norm   = cv2.NORM_HAMMING if des1.dtype == np.uint8 else cv2.NORM_L2
         matcher = cv2.BFMatcher(norm, crossCheck=False)
         matches = matcher.knnMatch(des1, des2, k=2)
 
@@ -267,8 +284,13 @@ class RigidRegistrar:
         pyramid_levels: list,
         max_features: int = 15000,
     ) -> None:
-        self.pyramid_levels = sorted(pyramid_levels)
-        self.feature_reg    = FeatureBasedRegistration(max_features)
+        if hasattr(pyramid_levels, "pyramid_levels"):
+            config = pyramid_levels
+            self.pyramid_levels = sorted(set(config.pyramid_levels))
+            self.feature_reg = FeatureBasedRegistration(config)
+        else:
+            self.pyramid_levels = sorted(pyramid_levels)
+            self.feature_reg    = FeatureBasedRegistration(max_features)
 
     def register(
         self,
@@ -309,6 +331,9 @@ class RigidRegistrar:
 
             # bring accumulated transform to this scale
             acc_s     = scale_translation_only(accumulated, scale_factor / current_scale)
+            logger.debug(f"  accumulated @ entry: {accumulated}")
+            logger.debug(f"  acc_s (accumulated scaled to {scale_factor}): {acc_s}")
+            logger.debug(f"  current_scale at entry: {current_scale}")
             mov_w     = warp_affine(mov_s,      acc_s, ref_s.shape, is_mask=False)
             mov_mask_w = warp_affine(mov_mask_s.astype(np.uint8), acc_s, ref_s.shape, is_mask=True)
 
@@ -336,7 +361,7 @@ class RigidRegistrar:
             # --- ECC (initialized with best so far) ---
             try:
                 T_ecc, ecc_ncc = register_ecc(
-                    ref_s, mov_w, ref_mask_s, best_local
+                    ref_s, mov_w, ref_mask_s, identity()
                 )
                 if ecc_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_ecc, ecc_ncc, "ECC"
@@ -357,12 +382,18 @@ class RigidRegistrar:
 
             # accept if not worse than baseline by more than 1%
             if best_local_ncc >= baseline_ncc - 0.01:
-                accumulated   = compose(best_local, acc_s)
+                accumulated   = compose_affine(best_local, acc_s)
                 current_scale = scale_factor
                 best_ncc      = best_local_ncc
                 best_method   = f"{best_local_method}@{scale_factor}"
                 logger.info(f"Scale {scale_factor}: {best_method}, NCC={best_ncc:.4f}")
 
         # scale translation back to full resolution
-        final_transform = upscale_to_full(accumulated, current_scale)
+        final_transform = scale_affine_translation(accumulated, 1.0 / current_scale)
+        
+        # Log transform details for debugging
+        logger.debug(f"Final accumulated transform (before upscale) @ scale {current_scale}: {accumulated}")
+        logger.debug(f"Final transform (after upscale to full resolution): {final_transform}")
+        logger.info(f"Final transform translations: tx={final_transform[0,2]:.3f}, ty={final_transform[1,2]:.3f}")
+        
         return final_transform, best_ncc, best_method

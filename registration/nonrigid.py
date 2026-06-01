@@ -50,6 +50,13 @@ except ImportError:
 # FLOW APPLICATION
 # ============================================================================
 
+def _as_2d(arr: np.ndarray, name: str) -> np.ndarray:
+    arr = np.asarray(arr)
+    arr = np.squeeze(arr)
+    if arr.ndim != 2:
+        raise ValueError(f"{name} must be 2D after squeeze, got shape {arr.shape}")
+    return arr
+
 def apply_flow(
     img: np.ndarray,
     flow: np.ndarray,
@@ -154,6 +161,18 @@ class OpticalFlowRegistrar:
             initial_ncc  : NCC before optical flow (after rigid)
             final_ncc    : NCC after optical flow
         """
+        ref = _as_2d(ref, "ref").astype(np.float32)
+        mov_rigid = _as_2d(mov_rigid, "mov_rigid").astype(np.float32)
+        ref_mask = _as_2d(ref_mask, "ref_mask").astype(bool)
+        mov_mask = _as_2d(mov_mask, "mov_mask").astype(bool)
+
+        if ref.shape != mov_rigid.shape:
+            raise ValueError(f"ref and mov_rigid shapes differ: {ref.shape} vs {mov_rigid.shape}")
+        if ref_mask.shape != ref.shape:
+            raise ValueError(f"ref_mask shape {ref_mask.shape} does not match ref shape {ref.shape}")
+        if mov_mask.shape != ref.shape:
+            raise ValueError(f"mov_mask shape {mov_mask.shape} does not match ref shape {ref.shape}")
+
         # baseline NCC after rigid registration
         overlap = ref_mask & mov_mask
         if np.sum(overlap) > 100:

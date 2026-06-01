@@ -329,3 +329,105 @@ def _center_on_canvas(
     canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
     canvas[top:top + h, left:left + w] = img.astype(np.float32)
     return canvas, (top, left)
+
+
+# ============================================================================
+# NOTEBOOK API ALIASES & SINGLE-CANDIDATE VERSION
+# ============================================================================
+
+def build_coarse_proxy_images_from_orig(
+    ref_full: np.ndarray,
+    mov_orig: np.ndarray,
+    config: ZStackConfig,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Alias for build_proxy_images to match notebook interface.
+    
+    See build_proxy_images for full documentation.
+    """
+    return build_proxy_images(ref_full, mov_orig, config)
+
+
+def masked_template_localization(
+    ref_proxy: np.ndarray,
+    mov_proxy: np.ndarray,
+    ref_mask_proxy: np.ndarray,
+    roi_margin_factor: float = 1.4,
+) -> dict:
+    """
+    Single-candidate template matching (single best match only).
+    
+    Simplified version of topk_template_match that returns only
+    the best candidate instead of top-k candidates.
+    
+    Parameters
+    ----------
+    ref_proxy : reference image at proxy scale
+    mov_proxy : moving image at proxy scale
+    ref_mask_proxy : reference tissue mask at proxy scale
+    roi_margin_factor : ROI expansion factor (default 1.4)
+    
+    Returns
+    -------
+    dict with keys:
+        - template_bbox_ref_proxy
+        - hit_bbox_mov_proxy
+        - roi_bbox_mov_proxy
+        - score
+    """
+    candidates = topk_template_match(
+        ref_proxy, mov_proxy, ref_mask_proxy,
+        roi_margin_factor=roi_margin_factor,
+        top_k=1,
+        min_peak_distance=256,
+        min_score=0.10,
+    )
+    
+    if not candidates:
+        raise RuntimeError("No candidates found during single template matching")
+    
+    best = candidates[0]
+    return {
+        "template_bbox_ref_proxy": best["template_bbox_ref_proxy"],
+        "hit_bbox_mov_proxy": best["hit_bbox_mov_proxy"],
+        "roi_bbox_mov_proxy": best["roi_bbox_mov_proxy"],
+        "score": best["score"],
+    }
+
+
+def masked_template_localization_topk(
+    ref_proxy: np.ndarray,
+    mov_proxy: np.ndarray,
+    ref_mask_proxy: np.ndarray,
+    roi_margin_factor: float = 1.4,
+    top_k: int = 5,
+    min_peak_distance: int = 256,
+    min_score: float = 0.10,
+) -> List[dict]:
+    """
+    Alias for topk_template_match to match notebook interface.
+    
+    See topk_template_match for full documentation.
+    """
+    return topk_template_match(
+        ref_proxy, mov_proxy, ref_mask_proxy,
+        roi_margin_factor=roi_margin_factor,
+        top_k=top_k,
+        min_peak_distance=min_peak_distance,
+        min_score=min_score,
+    )
+
+
+def build_refine_registration_images_from_orig(
+    ref_full: np.ndarray,
+    mov_orig: np.ndarray,
+    roi_bbox_mov_proxy: List[int],
+    proxy_scale: float,
+    config: ZStackConfig,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Alias for build_refine_images to match notebook interface.
+    
+    See build_refine_images for full documentation.
+    """
+    return build_refine_images(ref_full, mov_orig, roi_bbox_mov_proxy, proxy_scale, config)

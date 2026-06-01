@@ -1,6 +1,9 @@
 import logging
 from pathlib import Path
 
+import numpy as np
+import cv2
+
 from align.config import RegistrationConfig
 from align.io.reader import read_2d_as_float, discover_moving_files
 from align.io.writer import save_tiff, save_debug_overlay
@@ -28,6 +31,215 @@ class AlignmentPipeline:
             )
         else:
             self.nonrigid_registrar = None
+
+    def _compute_overlap_crop_box(
+        self,
+        ref_img: np.ndarray,
+        ref_mask: np.ndarray,
+        mov_img: np.ndarray,
+        transform: np.ndarray,
+    ) -> tuple:
+        """
+        Compute the bounding box of the valid overlap region.
+        
+        Projects the corners of the moving image through the transform,
+        finds the intersection with the reference tissue mask, and
+        returns (y0, y1, x0, x1).
+        
+        This is used to avoid OpenCV's 32767-pixel dimension limit
+        on very large images by cropping to the valid overlap region.
+        """
+        h_mov, w_mov = mov_img.shape
+        
+        # Project moving image corners through the transform
+        corners = np.array([
+            [0, 0],
+            [w_mov - 1, 0],
+            [w_mov - 1, h_mov - 1],
+            [0, h_mov - 1]
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        
+        transformed_corners = cv2.transform(corners, transform).reshape(-1, 2)
+        poly_i = np.round(transformed_corners).astype(np.int32)
+        
+        # Create a mask of the valid region (inside reference and inside ref mask)
+        valid_ref = np.zeros(ref_img.shape, dtype=np.uint8)
+        try:
+            cv2.fillConvexPoly(valid_ref, poly_i, 1)
+        except Exception as e:
+            logger.warning(f"Polygon fill failed: {e}, falling back to full reference")
+            return 0, ref_img.shape[0], 0, ref_img.shape[1]
+        
+        # Intersect with tissue mask
+        overlap = ref_mask.astype(bool) & (valid_ref.astype(bool))
+        
+        if np.sum(overlap) < 100:
+            logger.warning("Overlap region too small, falling back to full reference")
+            return 0, ref_img.shape[0], 0, ref_img.shape[1]
+        
+        # Find bounding box of overlap
+        ys, xs = np.where(overlap)
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        
+        return y0, y1, x0, x1
+
+    def _compute_source_region(
+        self,
+        mov_img: np.ndarray,
+        transform: np.ndarray,
+        output_shape: tuple,
+        margin: int = 100,
+    ) -> tuple:
+        """
+        Compute which region of source (moving) image is needed for output.
+        
+        Inverse-transforms the output crop box back to source space to determine
+        which region of mov_img should be extracted before warping.
+        
+        Parameters
+        ----------
+        mov_img : source image shape
+        transform : 2x3 forward transform (output -> source-ish coordinates)
+        output_shape : (h, w) of desired output
+        margin : extra margin around computed region
+        
+        Returns
+        -------
+        (src_y0, src_y1, src_x0, src_x1) - region to extract from mov_img
+        """
+        h_out, w_out = output_shape
+        h_src, w_src = mov_img.shape[:2]
+        
+        # Invert the transform to map from output back to source
+        # T maps source -> output, so T_inv maps output -> source
+        T_3x3 = np.vstack([transform, [0, 0, 1]])
+        try:
+            T_inv_3x3 = np.linalg.inv(T_3x3)
+            T_inv = T_inv_3x3[:2, :]
+        except np.linalg.LinAlgError:
+            logger.warning("Cannot invert transform, using full source image")
+            return 0, h_src, 0, w_src
+        
+        # Project output corners back to source space
+        out_corners = np.array([
+            [0, 0],
+            [w_out - 1, 0],
+            [w_out - 1, h_out - 1],
+            [0, h_out - 1]
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        
+        src_corners = cv2.transform(out_corners, T_inv).reshape(-1, 2)
+        
+        # Find bounding box in source space
+        src_x_min = np.clip(int(np.floor(src_corners[:, 0].min())) - margin, 0, w_src)
+        src_x_max = np.clip(int(np.ceil(src_corners[:, 0].max())) + margin, 0, w_src)
+        src_y_min = np.clip(int(np.floor(src_corners[:, 1].min())) - margin, 0, h_src)
+        src_y_max = np.clip(int(np.ceil(src_corners[:, 1].max())) + margin, 0, h_src)
+        
+        # Make sure dimensions are < 32767
+        src_w = src_x_max - src_x_min
+        src_h = src_y_max - src_y_min
+        
+        if src_w > 30000 or src_h > 30000:
+            logger.warning(f"Source region still large ({src_h}x{src_w}), may need further processing")
+        
+        logger.debug(f"Source region: [{src_y_min}:{src_y_max}, {src_x_min}:{src_x_max}] = {src_h}x{src_w}")
+        
+        return src_y_min, src_y_max, src_x_min, src_x_max
+
+    def _warp_tiled(
+        self,
+        mov_img: np.ndarray,
+        transform: np.ndarray,
+        output_shape: tuple,
+        tile_size: int = 25000,
+    ) -> np.ndarray:
+        """Warp image in destination tiles to avoid OpenCV's 32767-pixel limit."""
+        h_out, w_out = output_shape
+        h_src, w_src = mov_img.shape
+        max_cv_dim = 32766
+        tile_size = min(tile_size, 16000)
+        
+        logger.debug(f"_warp_tiled: src={mov_img.shape}, out={output_shape}, tile_size={tile_size}")
+        
+        # If both source and output fit, use direct warp
+        if (h_src < max_cv_dim and w_src < max_cv_dim and
+            h_out < max_cv_dim and w_out < max_cv_dim):
+            return warp_affine(mov_img, transform, (h_out, w_out), is_mask=False)
+        
+        # Initialize output
+        result = np.zeros(output_shape, dtype=np.float32)
+        
+        # Map each destination tile back to the source, crop that source patch,
+        # and adjust the affine so OpenCV never sees an oversized src or dst.
+        T = np.vstack([transform.astype(np.float32), [0, 0, 1]])
+        try:
+            T_inv = np.linalg.inv(T)[:2, :]
+        except np.linalg.LinAlgError:
+            logger.warning("Singular transform matrix, returning blank warped image")
+            return result
+
+        margin = 4
+        tile_count = 0
+        skipped_count = 0
+        for out_y0 in range(0, h_out, tile_size):
+            out_y1 = min(out_y0 + tile_size, h_out)
+            for out_x0 in range(0, w_out, tile_size):
+                out_x1 = min(out_x0 + tile_size, w_out)
+                tile_h = out_y1 - out_y0
+                tile_w = out_x1 - out_x0
+
+                out_corners = np.array([
+                    [out_x0, out_y0],
+                    [out_x1, out_y0],
+                    [out_x1, out_y1],
+                    [out_x0, out_y1],
+                ], dtype=np.float32).reshape(-1, 1, 2)
+                src_corners = cv2.transform(out_corners, T_inv).reshape(-1, 2)
+
+                src_x0 = max(0, int(np.floor(src_corners[:, 0].min())) - margin)
+                src_x1 = min(w_src, int(np.ceil(src_corners[:, 0].max())) + margin)
+                src_y0 = max(0, int(np.floor(src_corners[:, 1].min())) - margin)
+                src_y1 = min(h_src, int(np.ceil(src_corners[:, 1].max())) + margin)
+
+                if src_x0 >= src_x1 or src_y0 >= src_y1:
+                    skipped_count += 1
+                    continue
+
+                src_patch = mov_img[src_y0:src_y1, src_x0:src_x1]
+                src_h, src_w = src_patch.shape
+                if src_h >= max_cv_dim or src_w >= max_cv_dim:
+                    logger.warning(
+                        f"Skipping tile with oversized source patch {src_h}x{src_w}; "
+                        f"reduce tile_size below {tile_size}"
+                    )
+                    skipped_count += 1
+                    continue
+
+                tile_transform = transform.copy().astype(np.float32)
+                tile_transform[:, 2] += transform[:, :2] @ np.array([src_x0, src_y0], dtype=np.float32)
+                tile_transform[0, 2] -= out_x0
+                tile_transform[1, 2] -= out_y0
+
+                try:
+                    warped_tile = warp_affine(
+                        src_patch,
+                        tile_transform,
+                        (tile_h, tile_w),
+                        is_mask=False,
+                    )
+                except cv2.error as e:
+                    logger.warning(f"Warp failed for output tile ({out_y0}:{out_y1}, {out_x0}:{out_x1}): {e}")
+                    skipped_count += 1
+                    continue
+
+                result[out_y0:out_y1, out_x0:out_x1] = warped_tile
+                tile_count += 1
+
+        logger.debug(f"Tiled warp wrote {tile_count} tiles, skipped {skipped_count} tiles")
+        
+        return result
 
     def run(self):
         logger.info("Starting 2D Alignment Pipeline...")
@@ -74,20 +286,60 @@ class AlignmentPipeline:
             )
             logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
             
-            # Warp using affine transform
-            aligned_img = warp_affine(mov_img, transform, ref_img.shape, is_mask=False)
+            # Compute overlap crop box to handle large images (>32k pixels)
+            logger.info("Computing overlap crop box...")
+            y0, y1, x0, x1 = self._compute_overlap_crop_box(
+                ref_img, ref_mask, mov_img, transform
+            )
+            crop_h = y1 - y0
+            crop_w = x1 - x0
+            logger.info(f"Crop box: [{y0}:{y1}, {x0}:{x1}] -> size ({crop_h}, {crop_w})")
+            
+            # Adjust transform to crop coordinates
+            transform_crop = transform.copy().astype(np.float32)
+            transform_crop[0, 2] -= x0
+            transform_crop[1, 2] -= y0
+            
+            # Compute which region of moving image is needed (handles >32k width issue)
+            logger.debug("Computing source region for moving image...")
+            src_y0, src_y1, src_x0, src_x1 = self._compute_source_region(
+                mov_img, transform_crop, (crop_h, crop_w), margin=100
+            )
+            mov_img_crop = mov_img[src_y0:src_y1, src_x0:src_x1]
+            
+            # Adjust transform for extracted source region
+            transform_src = transform_crop.copy()
+            transform_src[:, 2] += transform_crop[:, :2] @ np.array([src_x0, src_y0], dtype=np.float32)
+            
+            logger.info(f"Source crop: [{src_y0}:{src_y1}, {src_x0}:{src_x1}] = {mov_img_crop.shape}")
+            
+            # Warp using tiled approach to handle large images
+            aligned_img = self._warp_tiled(mov_img_crop, transform_src, (crop_h, crop_w))
 
             # Non-Rigid Registration (Optical flow)
             if self.config.enable_nonrigid:
                 logger.info("Running Non-Rigid Registration (Optical Flow)...")
-                mov_mask_w = warp_affine(mov_mask.astype(np.uint8), transform, ref_img.shape, is_mask=True)
+                # For optical flow, also need to warp the mask - extract same region
+                mov_mask_crop = mov_mask[src_y0:src_y1, src_x0:src_x1]
+                mov_mask_w = self._warp_tiled(mov_mask_crop.astype(np.float32), transform_src, (crop_h, crop_w))
+                mov_mask_w = np.squeeze(mov_mask_w)
+                mov_mask_w = (mov_mask_w > 0.5).astype(bool)  # binarize
+                
+                # Crop reference for optical flow
+                ref_prep_crop = np.squeeze(ref_prep[y0:y1, x0:x1]).astype(np.float32)
+                ref_mask_crop = np.squeeze(ref_mask[y0:y1, x0:x1]).astype(bool)
+                aligned_img = np.squeeze(aligned_img).astype(np.float32)
+                logger.debug(
+                    f"Non-rigid shapes: ref={ref_prep_crop.shape}, aligned={aligned_img.shape}, "
+                    f"ref_mask={ref_mask_crop.shape}, mov_mask={mov_mask_w.shape}"
+                )
                 aligned_img, base_ncc, final_ncc = self.nonrigid_registrar.refine(
-                    ref_prep, aligned_img, ref_mask, mov_mask_w
+                    ref_prep_crop, aligned_img, ref_mask_crop, mov_mask_w
                 )
                 logger.info(f"Non-rigid alignment complete (NCC: {base_ncc:.4f} -> {final_ncc:.4f})")
 
             # Output Generation
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
-            save_debug_overlay(ref_img, aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+            save_debug_overlay(ref_prep[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
             
         logger.info("Pipeline completed successfully!")

@@ -169,13 +169,19 @@ def compute_mip(
     n_z = zstack.shape[0]
 
     if z_range is None:
-        logger.debug(f"Computing MIP from all {n_z} Z-planes")
+        logger.info(f"Computing MIP from all {n_z} Z-planes")
         return np.max(zstack, axis=0), f"MIP_all_{n_z}_planes"
 
     z_start, z_end = z_range
-    z_end = min(z_end, n_z)
-    logger.debug(f"Computing MIP from Z-planes {z_start}:{z_end}")
+    logger.info(f"Computing MIP from Z-planes {z_start} to {z_end - 1}")
     return np.max(zstack[z_start:z_end], axis=0), f"MIP_z{z_start}-{z_end - 1}"
+
+
+def compute_max_projection(
+    zstack: np.ndarray,
+    z_range: Optional[Tuple[int, int]] = None,
+) -> Tuple[np.ndarray, str]:
+    return compute_mip(zstack, z_range)
 
 
 def extract_z_plane(
@@ -194,10 +200,43 @@ def extract_z_plane(
     -------
     (plane, z_index) : 2D array and the z index used
     """
+    if zstack.ndim not in [3, 4]:
+        raise ValueError(f"Expected 3D or 4D array, got shape {zstack.shape}")
     n_z     = zstack.shape[0]
     z_index = n_z // 2 if z_plane is None else z_plane
-    logger.debug(f"Extracting Z-plane {z_index}/{n_z}")
+    logger.info(f"Using Z-plane: {z_index}/{n_z}")
     return zstack[z_index], z_index
+
+
+def extract_reference_plane(
+    zstack: np.ndarray,
+    z_plane: Optional[int] = None,
+) -> Tuple[np.ndarray, int]:
+    return extract_z_plane(zstack, z_plane)
+
+
+def replicate_to_zstack(
+    channel_2d: np.ndarray,
+    n_z_planes: int,
+) -> np.ndarray:
+    """
+    Replicate a 2D image across multiple Z-planes.
+    
+    Used to create a z-stack output from a single 2D aligned channel.
+    
+    Parameters
+    ----------
+    channel_2d : 2D array (H, W)
+        2D image to replicate
+    n_z_planes : int
+        Number of Z-planes to create
+    
+    Returns
+    -------
+    zstack : 3D array (Z, H, W)
+        The 2D image replicated n_z_planes times along axis 0
+    """
+    return np.stack([channel_2d] * n_z_planes, axis=0)
 
 
 # ============================================================================
@@ -208,6 +247,20 @@ _TIFF_EXTENSIONS = (".tif", ".tiff")
 
 # Suffixes that identify a file as already processed (skip these)
 _SKIP_PATTERNS = ("crop_aligned2dot3d", "debug_ch00_alignment")
+
+
+def find_reference_candidates(
+    folder: Path,
+    extensions: tuple = _TIFF_EXTENSIONS,
+) -> List[Path]:
+    return sorted([
+        p for p in folder.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in extensions
+        and "_ref" in p.stem.lower()
+        and "crop_aligned2dot3d" not in p.stem.lower()
+        and "debug_ch00_alignment" not in p.stem.lower()
+    ])
 
 
 def discover_moving_files(
@@ -296,21 +349,12 @@ def find_reference_file(
         If found: (Path, None)
         If not found or ambiguous: (None, reason_string)
     """
-    candidates = sorted([
-        p for p in folder.iterdir()
-        if p.is_file()
-        and p.suffix.lower() in extensions
-        and "_ref" in p.stem.lower()
-        and not any(pat in p.stem.lower() for pat in _SKIP_PATTERNS)
-    ])
-
-    if len(candidates) == 0:
-        return None, "no _ref file found"
-    if len(candidates) > 1:
-        names = [p.name for p in candidates]
-        return None, f"multiple _ref files found: {names}"
-
-    return candidates[0], None
+    refs = find_reference_candidates(folder, extensions=extensions)
+    if len(refs) == 0:
+        return None, "no _ref file"
+    if len(refs) > 1:
+        return None, "multiple _ref files"
+    return refs[0], None
 
 
 def find_processable_folders(
@@ -330,29 +374,8 @@ def find_processable_folders(
     -------
     Deduplicated list of Path objects, root first
     """
-    if skip_names is None:
-        skip_names = {"done", "metadata", "__pycache__"}
-
-    root    = Path(root_folder)
-    folders = [root]
-
-    for p in root.rglob("*"):
-        if not p.is_dir():
-            continue
-        if p.name.lower() in skip_names:
-            continue
-        folders.append(p)
-
-    # deduplicate while preserving order
-    seen = set()
-    out  = []
-    for p in folders:
-        key = str(p.resolve())
-        if key not in seen:
-            seen.add(key)
-            out.append(p)
-
-    return out
+    root = Path(root_folder)
+    return [root] + sorted([p for p in root.rglob("*") if p.is_dir()])
 
 
 def replicate_to_zstack(channel_2d: np.ndarray, n_z_planes: int) -> np.ndarray:

@@ -174,4 +174,4 @@ class ZStackConfig:
         self.scale_factor = self.pixel_size_20x[0] / self.voxel_size_63x[0]
         if self.output_folder:
             Path(self.output_folder).mkdir(parents=True, exist_ok=True)
-        logger.info(f"ZStackConfig: scale_factor (20x→63x) = {self.scale_factor:.4f}x")
+        logger.info(f"Scale factor (20x→63x): {self.scale_factor:.4f}x")
