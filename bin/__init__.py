@@ -1,2 +1,0 @@
-"""Alignment pipeline modules."""
-
