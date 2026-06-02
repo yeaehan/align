@@ -1,10 +1,6 @@
 import argparse
 import logging
-import sys
 from pathlib import Path
-
-# Add parent directory to path so 'align' package can be imported
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from align.config import RegistrationConfig, ZStackConfig
 from align.io.reader import discover_moving_files, find_reference_file
