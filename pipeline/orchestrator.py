@@ -260,7 +260,10 @@ class AlignmentPipeline:
         ref_mask = TissueProcessor.create_tissue_mask(ref_prep, self.config.tissue_mask_percentile)
 
         # 2. Find all moving files in the folder
-        moving_files = discover_moving_files(ref_path)
+        if hasattr(self.config, 'moving_files') and self.config.moving_files is not None:
+            moving_files = self.config.moving_files
+        else:
+            moving_files = discover_moving_files(ref_path)
         logger.info(f"Found {len(moving_files)} moving files to align.")
 
         out_dir = Path(self.config.output_folder)
