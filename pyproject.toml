@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "align"
+version = "0.1.0"
+description = "Multi-Round Image Alignment Pipeline for large-scale multiplexed imaging"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python-headless",
+    "scikit-image",
+    "tifffile",
+    "readlif"
+]
+
+[project.optional-dependencies]
+# Install via: pip install -e .[gpu]
+gpu = ["cupy-cuda11x"]
+
+[project.scripts]
+# Creates a global terminal command
+align-pipeline = "align.core.run_pipeline:main"
+
+[tool.setuptools]
+# This tells Python to treat the folder containing this file as the "align" package
+package-dir = {"align" = ""}
+packages = ["align", "align.core", "align.io", "align.pipeline", "align.registration"]

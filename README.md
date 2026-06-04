@@ -7,11 +7,9 @@ This is a robust and highly optimized workspace designed for large-scale, multip
 The project is now packaged using `pyproject.toml`, which makes installation very easy and creates a global command-line shortcut for you.
 
 Open your terminal, navigate to the `align` directory, and run:
-Open your terminal, navigate to the root of the workspace, and run:
 
 ```bash
 cd /Users/hanyeaeun/Desktop/workspace/align
-cd /Users/hanyeaeun/Desktop/workspace/
 pip install -e .
 ```
 *(Note: If you do not have a GPU, the pipeline will fall back to CPU via scipy gracefully).*
