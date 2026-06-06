@@ -30,8 +30,6 @@ Provide the input folder containing the TIFFs, an output destination, and the ch
 align-pipeline \
     --input_folder ../data/raw_sample_01 \
     --output_folder ../data/aligned_sample_01 \
-    --input_folder ./data/raw_sample_01 \
-    --output_folder ./data/aligned_sample_01 \
     --ref ch00
 ```
 

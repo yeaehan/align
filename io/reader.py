@@ -10,6 +10,7 @@ read_tiff            : read a single TIFF, return 2D float (MIP if 3D/4D)
 read_zstack          : read a z-stack TIFF, return 3D float array (Z, H, W)
 read_2d_as_float     : alias with explicit max-projection control
 discover_moving_files: find all non-reference TIFFs in a folder
+find_reference_file  : find a specific '_ref' file (for 3D Z-stack pipeline)
 select_anchor_file   : pick the best channel to use as registration anchor
 """
 
@@ -18,6 +19,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from align.io.lif import LifImageReader
 
 import numpy as np
 import tifffile
@@ -52,6 +55,8 @@ def _to_float32(img: np.ndarray) -> np.ndarray:
 def read_2d_as_float(
     path: str,
     use_max_projection: bool = True,
+    channel_idx: int = 0, # For LIF files
+    scene_idx: int = 0,   # For LIF files
 ) -> np.ndarray:
     """
     Read any TIFF and return a single 2D float32 image.

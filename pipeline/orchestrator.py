@@ -15,6 +15,26 @@ from align.registration.nonrigid import OpticalFlowRegistrar
 
 logger = logging.getLogger(__name__)
 
+# --- MASSIVE IMAGE MEMORY FIX ---
+# Standard OpenCV has a hard limit of 2.14GB (2^31 - 1 bytes) for a single matrix. 
+# cv2.Laplacian creates a CV_32F matrix, which crashes if width * height > ~530 million pixels.
+# This patches the TissueProcessor to compute weight maps at a lower scale for massive images.
+_original_create_weight_map = TissueProcessor.create_weight_map
+
+def _safe_create_weight_map(img: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+    if img.shape[0] * img.shape[1] < 200_000_000:
+        return _original_create_weight_map(img, overlap)
+    
+    logger.info(f"Image too large for OpenCV weight map ({img.shape}), computing at 0.25x scale...")
+    h, w = img.shape
+    img_small = cv2.resize(img, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
+    overlap_small = cv2.resize(overlap.astype(np.uint8), (w // 4, h // 4), interpolation=cv2.INTER_NEAREST).astype(bool)
+    
+    w_map_small = _original_create_weight_map(img_small, overlap_small)
+    return cv2.resize(w_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+TissueProcessor.create_weight_map = staticmethod(_safe_create_weight_map)
+
 class AlignmentPipeline:
     def __init__(self, config: RegistrationConfig):
         self.config = config
