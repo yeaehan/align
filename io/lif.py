@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from readlif.reader import LifFile
 from align.io.reader import _to_float32
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,18 @@ class LifImageReader:
             })
         logger.debug(f"Loaded LIF file '{self.path.name}' with {self.num_scenes} scenes.")
 
-    def get_scene_info(self, scene_idx: int = 0) -> Dict:
+    def get_merged_scene_idx(self) -> int:
+        """Find the index of the scene containing 'Merged' in its name."""
+        for idx, info in enumerate(self._scene_infos):
+            if "merged" in info["name"].lower():
+                return idx
+        logger.warning(f"No scene containing 'Merged' found in {self.path.name}. Defaulting to scene 0.")
+        return 0
+
+    def get_scene_info(self, scene_idx: Optional[int] = None) -> Dict:
         """Return metadata about a specific scene."""
+        if scene_idx is None:
+            scene_idx = self.get_merged_scene_idx()
         if scene_idx < 0 or scene_idx >= self.num_scenes:
             raise IndexError(f"Scene index {scene_idx} out of range for {self.path.name} (0-{self.num_scenes-1})")
         return self._scene_infos[scene_idx]
@@ -52,7 +62,7 @@ class LifImageReader:
         """Return a list of all scene infos."""
         return self._scene_infos
 
-    def read_channel_as_float(self, channel_idx: int, scene_idx: int = 0, use_mip: bool = True) -> np.ndarray:
+    def read_channel_as_float(self, channel_idx: int, scene_idx: Optional[int] = None, use_mip: bool = True) -> np.ndarray:
         """
         Extract a single channel from a scene, apply MIP if 3D, and normalize to [0, 1].
 
@@ -63,6 +73,9 @@ class LifImageReader:
         use_mip     : If True and the image is 3D, performs a Max Intensity Projection.
                       Otherwise, extracts the middle Z-plane.
         """
+        if scene_idx is None:
+            scene_idx = self.get_merged_scene_idx()
+            
         scene_data = self.get_scene_info(scene_idx)
         if channel_idx < 0 or channel_idx >= scene_data['channels']:
             raise IndexError(f"Channel index {channel_idx} out of range for scene {scene_idx} in {self.path.name} (0-{scene_data['channels']-1})")

@@ -56,7 +56,7 @@ def read_2d_as_float(
     path: str,
     use_max_projection: bool = True,
     channel_idx: int = 0, # For LIF files
-    scene_idx: int = 0,   # For LIF files
+    scene_idx: Optional[int] = None,   # For LIF files
 ) -> np.ndarray:
     """
     Read any TIFF and return a single 2D float32 image.

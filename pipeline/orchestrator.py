@@ -21,19 +21,32 @@ logger = logging.getLogger(__name__)
 # This patches the TissueProcessor to compute weight maps at a lower scale for massive images.
 _original_create_weight_map = TissueProcessor.create_weight_map
 
-def _safe_create_weight_map(img: np.ndarray, overlap: np.ndarray) -> np.ndarray:
-    if img.shape[0] * img.shape[1] < 200_000_000:
+def _tiled_create_weight_map(img: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+    h, w = img.shape
+    if h < 30000 and w < 30000 and (h * w) < 150_000_000:
         return _original_create_weight_map(img, overlap)
     
-    logger.info(f"Image too large for OpenCV weight map ({img.shape}), computing at 0.25x scale...")
-    h, w = img.shape
-    img_small = cv2.resize(img, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
-    overlap_small = cv2.resize(overlap.astype(np.uint8), (w // 4, h // 4), interpolation=cv2.INTER_NEAREST).astype(bool)
+    logger.info(f"Image too large for OpenCV ({w}x{h}), computing weight map in tiles...")
+    result = np.zeros_like(img, dtype=np.float32)
+    tile_size = 10000
     
-    w_map_small = _original_create_weight_map(img_small, overlap_small)
-    return cv2.resize(w_map_small, (w, h), interpolation=cv2.INTER_LINEAR)
+    for y0 in range(0, h, tile_size):
+        y1 = min(y0 + tile_size, h)
+        for x0 in range(0, w, tile_size):
+            x1 = min(x0 + tile_size, w)
+            
+            py0, py1 = max(0, y0 - 5), min(h, y1 + 5)
+            px0, px1 = max(0, x0 - 5), min(w, x1 + 5)
+            
+            tile_wmap = _original_create_weight_map(img[py0:py1, px0:px1], overlap[py0:py1, px0:px1])
+            
+            cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
+            cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
+            result[y0:y1, x0:x1] = tile_wmap[cy0:cy1, cx0:cx1]
+            
+    return result
 
-TissueProcessor.create_weight_map = staticmethod(_safe_create_weight_map)
+TissueProcessor.create_weight_map = staticmethod(_tiled_create_weight_map)
 
 class AlignmentPipeline:
     def __init__(self, config: RegistrationConfig):
@@ -102,6 +115,15 @@ class AlignmentPipeline:
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         
+        # --- SAFETY CLAMP: Prevent OpenCV 32767 limit crash ---
+        max_cv_dim = 32700
+        if y1 - y0 > max_cv_dim:
+            logger.warning(f"Overlap height {y1-y0} exceeds OpenCV limit! Clamping to {max_cv_dim}.")
+            y1 = y0 + max_cv_dim
+        if x1 - x0 > max_cv_dim:
+            logger.warning(f"Overlap width {x1-x0} exceeds OpenCV limit! Clamping to {max_cv_dim}.")
+            x1 = x0 + max_cv_dim
+            
         return y0, y1, x0, x1
 
     def _compute_source_region(
