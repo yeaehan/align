@@ -20,8 +20,6 @@ import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from align.io.lif import LifImageReader
-
 import numpy as np
 import tifffile
 
@@ -77,6 +75,12 @@ def read_2d_as_float(
     -------
     float32 array of shape (H, W), values in [0, 1]
     """
+    p = Path(path)
+    if p.suffix.lower() == ".lif":
+        from align.io.lif import LifImageReader  # Lazy import breaks circular dependency
+        lif_reader = LifImageReader(str(path))
+        return lif_reader.read_channel_as_float(channel_idx, scene_idx, use_max_projection)
+
     img = tifffile.imread(str(path))
 
     if img.ndim == 2:
@@ -113,13 +117,15 @@ def read_2d_as_float(
 # Z-STACK READING
 # ============================================================================
 
-def read_zstack(path: str) -> Tuple[np.ndarray, int]:
+def read_zstack(path: str, channel_idx: int = 0, scene_idx: Optional[int] = None) -> Tuple[np.ndarray, int]:
     """
-    Read a z-stack TIFF and return the full 3D array plus z-plane count.
+    Read a z-stack TIFF or LIF and return the full 3D array plus z-plane count.
 
     Parameters
     ----------
-    path : path to the z-stack TIFF
+    path        : path to the z-stack file
+    channel_idx : For LIF files, the 0-indexed channel to read.
+    scene_idx   : For LIF files, the 0-indexed scene to read from.
 
     Returns
     -------
@@ -131,6 +137,18 @@ def read_zstack(path: str) -> Tuple[np.ndarray, int]:
     ------
     ValueError if the file is not a 3D or 4D array
     """
+    p = Path(path)
+    if p.suffix.lower() == ".lif":
+        from align.io.lif import LifImageReader
+        lif_reader = LifImageReader(str(path))
+        scene_data = lif_reader.get_scene_info(scene_idx)
+        img = lif_reader.lif.get_image(scene_data['scene_idx'])
+        z_stack = np.zeros((img.dims.z, img.dims.y, img.dims.x), dtype=np.float32)
+        for z in range(img.dims.z):
+            plane = np.array(img.get_plane(z=z, c=channel_idx, t=0))
+            z_stack[z] = _to_float32(plane)
+        return z_stack, img.dims.z
+
     raw = tifffile.imread(str(path))
     logger.debug(f"Loaded z-stack {Path(path).name}: shape={raw.shape}, dtype={raw.dtype}")
 
