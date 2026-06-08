@@ -75,6 +75,15 @@ def _tiled_create_weight_map(img: np.ndarray, overlap: np.ndarray) -> np.ndarray
 
 TissueProcessor.create_weight_map = staticmethod(_tiled_create_weight_map)
 
+# --- GPU MEMORY CLEARING ---
+def clear_gpu_memory():
+    try:
+        import cupy as cp
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except ImportError:
+        pass
+
 class AlignmentPipeline:
     def __init__(self, config: RegistrationConfig):
         self.config = config
@@ -310,6 +319,32 @@ class AlignmentPipeline:
         
         return result
 
+    def _preprocess_large_image(self, img: np.ndarray) -> np.ndarray:
+        h, w = img.shape
+        # If smaller than ~200MP, run normally
+        if h * w < 200_000_000:
+            return preprocess_dapi(img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
+        
+        logger.info(f"Image is massive ({w}x{h}). Preprocessing in tiles to prevent GPU swap/freeze...")
+        result = np.zeros_like(img, dtype=np.float32)
+        tile_size = 10000
+        margin = self.config.preprocessing_tophat_radius + 20
+        
+        for y0 in range(0, h, tile_size):
+            y1 = min(y0 + tile_size, h)
+            for x0 in range(0, w, tile_size):
+                x1 = min(x0 + tile_size, w)
+                
+                py0, py1 = max(0, y0 - margin), min(h, y1 + margin)
+                px0, px1 = max(0, x0 - margin), min(w, x1 + margin)
+                
+                tile_prep = preprocess_dapi(img[py0:py1, px0:px1], tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
+                
+                cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
+                cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
+                result[y0:y1, x0:x1] = tile_prep[cy0:cy1, cx0:cx1]
+        return result
+
     def run(self):
         logger.info("Starting 2D Alignment Pipeline...")
         ref_path = Path(self.config.reference_file)
@@ -320,13 +355,16 @@ class AlignmentPipeline:
 
         # 1. Load and prepare reference image
         logger.info(f"Loading reference: {ref_path.name}")
+        logger.info("Reading reference image (Network I/O)...")
         ref_img = read_2d_as_float(str(ref_path))
-        ref_prep = preprocess_dapi(
-            ref_img, 
-            tophat_radius=self.config.preprocessing_tophat_radius,
-            use_gpu=self.config.use_gpu
-        )
+        
+        logger.info("Preprocessing reference image...")
+        ref_prep = self._preprocess_large_image(ref_img)
+        clear_gpu_memory()
+        
+        logger.info("Creating reference tissue mask...")
         ref_mask = TissueProcessor.create_tissue_mask(ref_prep, self.config.tissue_mask_percentile)
+        clear_gpu_memory()
 
         # 2. Find all moving files in the folder
         if hasattr(self.config, 'moving_files') and self.config.moving_files is not None:
@@ -344,13 +382,16 @@ class AlignmentPipeline:
             logger.info(f"--- Aligning {mov_path.name} ---")
             log_hardware_usage("Pre-Registration")
             
+            logger.info("Reading moving image (Network I/O)...")
             mov_img = read_2d_as_float(str(mov_path))
-            mov_prep = preprocess_dapi(
-                mov_img,
-                tophat_radius=self.config.preprocessing_tophat_radius,
-                use_gpu=self.config.use_gpu
-            )
+            
+            logger.info("Preprocessing moving image...")
+            mov_prep = self._preprocess_large_image(mov_img)
+            clear_gpu_memory()
+            
+            logger.info("Creating moving tissue mask...")
             mov_mask = TissueProcessor.create_tissue_mask(mov_prep, self.config.tissue_mask_percentile)
+            clear_gpu_memory()
 
             # Rigid Registration
             logger.info("Running Rigid Registration...")
