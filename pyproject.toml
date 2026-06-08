@@ -16,7 +16,8 @@ dependencies = [
     "opencv-python-headless",
     "scikit-image",
     "tifffile",
-    "readlif"
+    "readlif",
+    "psutil"
 ]
 
 [project.optional-dependencies]

@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import subprocess
 
 import numpy as np
 import cv2
@@ -14,6 +15,32 @@ from align.registration.rigid import RigidRegistrar
 from align.registration.nonrigid import OpticalFlowRegistrar
 
 logger = logging.getLogger(__name__)
+
+# --- HARDWARE PROFILER ---
+def log_hardware_usage(step_name="Hardware Status"):
+    """Logs current CPU, System RAM, and GPU VRAM utilization."""
+    try:
+        import psutil
+        cpu_util = psutil.cpu_percent(interval=0.1)
+        ram = psutil.virtual_memory()
+        ram_used_gb = ram.used / (1024**3)
+        ram_total_gb = ram.total / (1024**3)
+        logger.info(f"[{step_name}] CPU: {cpu_util}% | System RAM: {ram_used_gb:.1f}GB / {ram_total_gb:.1f}GB ({ram.percent}%)")
+    except ImportError:
+        pass
+        
+    try:
+        # Query nvidia-smi for GPU stats natively
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,utilization.gpu,memory.used,memory.total', '--format=csv,noheader'],
+            capture_output=True, text=True, check=True
+        )
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                idx, gpu_util, mem_used, mem_total = line.split(', ')
+                logger.info(f"[{step_name}] GPU {idx}: Util {gpu_util} | VRAM {mem_used} / {mem_total}")
+    except Exception:
+        pass  # nvidia-smi not found or failed
 
 # --- MASSIVE IMAGE MEMORY FIX ---
 # Standard OpenCV has a hard limit of 2.14GB (2^31 - 1 bytes) for a single matrix. 
@@ -315,6 +342,7 @@ class AlignmentPipeline:
         for mov_file in moving_files:
             mov_path = Path(mov_file)
             logger.info(f"--- Aligning {mov_path.name} ---")
+            log_hardware_usage("Pre-Registration")
             
             mov_img = read_2d_as_float(str(mov_path))
             mov_prep = preprocess_dapi(
@@ -330,6 +358,7 @@ class AlignmentPipeline:
                 ref_prep, mov_prep, ref_mask, mov_mask
             )
             logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
+            log_hardware_usage("Post-Rigid Registration")
             
             # Compute overlap crop box to handle large images (>32k pixels)
             logger.info("Computing overlap crop box...")
@@ -382,6 +411,7 @@ class AlignmentPipeline:
                     ref_prep_crop, aligned_img, ref_mask_crop, mov_mask_w
                 )
                 logger.info(f"Non-rigid alignment complete (NCC: {base_ncc:.4f} -> {final_ncc:.4f})")
+                log_hardware_usage("Post-Optical Flow")
 
             # Output Generation
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
