@@ -425,11 +425,32 @@ class AlignmentPipeline:
 
                 # Rigid Registration
                 logger.info("Running Rigid Registration...")
-                transform, rigid_ncc, method = self.rigid_registrar.register(
-                    ref_prep, mov_prep, ref_mask, mov_mask
-                )
-                logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
+                
+                # --- PROXY SCALING (From Notebook Optimization) ---
+                # The notebook limits registration to `refine_max_dim=4096`.
+                # We cap at 8192 to guarantee it runs in seconds while keeping high accuracy.
+                h_mov, w_mov = mov_prep.shape
+                h_ref, w_ref = ref_prep.shape
+                max_dim = max(h_mov, w_mov, h_ref, w_ref)
+                max_rigid_dim = 8192.0
+                
+                if max_dim > max_rigid_dim:
+                    proxy_scale = max_rigid_dim / max_dim
+                    logger.info(f"Image is {max_dim}px. Downscaling to {max_rigid_dim}px proxy for instant rigid registration...")
+                    
+                    ref_proxy = cv2.resize(ref_prep, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
+                    mov_proxy = cv2.resize(mov_prep, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
+                    ref_mask_p = cv2.resize(ref_mask.astype(np.uint8), (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_NEAREST).astype(bool)
+                    mov_mask_p = cv2.resize(mov_mask.astype(np.uint8), (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_NEAREST).astype(bool)
+                    
+                    proxy_transform, rigid_ncc, method = self.rigid_registrar.register(ref_proxy, mov_proxy, ref_mask_p, mov_mask_p)
+                    transform = proxy_transform.copy()
+                    transform[0, 2] /= proxy_scale
+                    transform[1, 2] /= proxy_scale
+                else:
+                    transform, rigid_ncc, method = self.rigid_registrar.register(ref_prep, mov_prep, ref_mask, mov_mask)
                 log_hardware_usage("Post-Rigid Registration")
+                logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
                 
                 transform_cache[group_key] = transform
             
