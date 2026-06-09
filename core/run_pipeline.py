@@ -1,18 +1,62 @@
 import argparse
 import logging
 from pathlib import Path
+import numpy as np
+import tifffile
 
 from align.config import RegistrationConfig, ZStackConfig
 from align.io.reader import discover_moving_files, find_reference_file
+from align.io.lif import LifImageReader
 from align.pipeline.orchestrator import AlignmentPipeline
 from align.pipeline.zstack import ZStackAlignmentPipeline
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+def auto_extract_lifs(target_dir: Path) -> Path:
+    """Automatically extracts .lif files to a subdirectory and returns the new directory."""
+    lif_files = [f for f in target_dir.iterdir() if f.is_file() and f.suffix.lower() == '.lif']
+    if not lif_files:
+        return target_dir
+        
+    out_dir = target_dir / "extracted_tiffs"
+    if out_dir.exists() and any(f.suffix.lower() in {'.tif', '.tiff'} for f in out_dir.iterdir()):
+        logger.info(f"Using previously extracted TIFFs in {out_dir.name}/")
+        return out_dir
+        
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"📦 Found {len(lif_files)} LIF files. Auto-extracting channels...")
+    
+    for lif_file in lif_files:
+        try:
+            reader = LifImageReader(str(lif_file))
+            merged_idx = reader.get_merged_scene_idx()
+            scene_info = reader.get_scene_info(merged_idx)
+            
+            logger.info(f"  -> Extracting '{lif_file.name}' (Scene: '{scene_info['name']}')")
+            
+            for c in range(scene_info['channels']):
+                # Utilize lif.py's robust extraction and float32 normalization
+                mip = reader.read_channel_as_float(channel_idx=c, scene_idx=merged_idx, use_mip=True)
+                
+                suffix = f"_ch{c:02d}_MIP" if scene_info['dims'][0] > 1 else f"_ch{c:02d}"
+                safe_name = "".join([char if char.isalnum() or char in " _-" else "_" for char in scene_info['name']])
+                out_file = out_dir / f"{lif_file.stem}_{safe_name}{suffix}.tif"
+                
+                # Convert back to uint16 for saving the extracted TIFF
+                tifffile.imwrite(out_file, (mip * 65535.0).astype(np.uint16))
+        except Exception as e:
+            logger.error(f"Failed to extract {lif_file.name}: {e}")
+            
+    return out_dir
+
 def get_batches(input_dir: Path, delim: str = "_"):
     """Auto-detect batch processing mode (nested folders vs flat prefix-based files)."""
-    subdirs = [d for d in input_dir.iterdir() if d.is_dir()]
+    subdirs = [d for d in input_dir.iterdir() if d.is_dir() and d.name != "extracted_tiffs"]
+    
+    # Check root directory for LIFs as well
+    input_dir = auto_extract_lifs(input_dir)
+    
     tiff_extensions = {'.tif', '.tiff', '.TIF', '.TIFF'}
     tiff_files = [f for f in input_dir.iterdir() if f.is_file() and f.suffix in tiff_extensions]
 
@@ -21,9 +65,10 @@ def get_batches(input_dir: Path, delim: str = "_"):
     if len(subdirs) > 0 and len(tiff_files) == 0:
         logger.info("Auto-detected NESTED batch mode (subfolders found).")
         for d in subdirs:
-            tiffs = [f for f in d.iterdir() if f.is_file() and f.suffix in tiff_extensions]
+            d_extracted = auto_extract_lifs(d)
+            tiffs = [f for f in d_extracted.iterdir() if f.is_file() and f.suffix in tiff_extensions]
             if tiffs:
-                batches[d.name] = {'files': tiffs, 'dir': d}
+                batches[d.name] = {'files': tiffs, 'dir': d_extracted}
     else:
         if len(subdirs) > 0 and len(tiff_files) > 0:
             logger.warning("Found both subdirectories and TIFF files in the root. Defaulting to FLAT batch mode for root TIFFs.")
@@ -68,6 +113,9 @@ def main():
     if not input_dir.exists():
         logger.error(f"Input folder does not exist: {input_dir}")
         return
+        
+    # Auto-extract LIF files if present in the root target folder
+    input_dir = auto_extract_lifs(input_dir)
 
     if args.batch:
         batches = get_batches(input_dir)
