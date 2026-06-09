@@ -21,7 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Install via: pip install -e .[gpu]
-gpu = ["cupy-cuda11x"]
+# Updated for RTX 5090 (CUDA 13.x)
+gpu = ["cupy-cuda13x"]
 
 [project.scripts]
 # Creates a global terminal command
