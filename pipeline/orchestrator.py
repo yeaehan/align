@@ -367,12 +367,8 @@ class AlignmentPipeline:
         logger.info("Reading reference image (Network I/O)...")
         ref_img = read_2d_as_float(str(ref_path))
         
-        logger.info("Preprocessing reference image...")
-        ref_prep = self._preprocess_large_image(ref_img)
-        clear_gpu_memory()
-        
         logger.info("Creating reference tissue mask...")
-        ref_mask = TissueProcessor.create_tissue_mask(ref_prep, self.config.tissue_mask_percentile)
+        ref_mask = TissueProcessor.create_tissue_mask(ref_img, self.config.tissue_mask_percentile)
         clear_gpu_memory()
 
         # 2. Find all moving files in the folder
@@ -434,7 +430,7 @@ class AlignmentPipeline:
                 # The notebook limits registration to `refine_max_dim=4096`.
                 # We cap at 8192 to guarantee it runs in seconds while keeping high accuracy.
                 h_mov, w_mov = mov_img.shape
-                h_ref, w_ref = ref_prep.shape
+                h_ref, w_ref = ref_img.shape
                 max_dim = max(h_mov, w_mov, h_ref, w_ref)
                 max_rigid_dim = 8192.0
                 
@@ -442,10 +438,12 @@ class AlignmentPipeline:
                     proxy_scale = max_rigid_dim / max_dim
                     logger.info(f"   📐 Image is {max_dim}px. Downscaling to {max_rigid_dim}px proxy for instant rigid registration...")
                     
-                    ref_proxy = cv2.resize(ref_prep, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
+                    # Resize the RAW images first before applying the heavy morphological filters!
+                    ref_proxy_raw = cv2.resize(ref_img, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
                     mov_proxy_raw = cv2.resize(mov_img, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
                     
-                    logger.info("   ⚡ Preprocessing moving proxy (instant)...")
+                    logger.info("   ⚡ Applying morphological filters to proxy images (instant)...")
+                    ref_proxy = preprocess_dapi(ref_proxy_raw, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
                     mov_proxy = preprocess_dapi(mov_proxy_raw, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
                     
                     ref_mask_p = cv2.resize(ref_mask.astype(np.uint8), (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_NEAREST).astype(bool)
@@ -456,7 +454,8 @@ class AlignmentPipeline:
                     transform[0, 2] /= proxy_scale
                     transform[1, 2] /= proxy_scale
                 else:
-                    logger.info("   ⚡ Preprocessing moving image...")
+                    logger.info("   ⚡ Applying morphological filters to images...")
+                    ref_prep = preprocess_dapi(ref_img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
                     mov_prep = preprocess_dapi(mov_img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
                     transform, rigid_ncc, method = self.rigid_registrar.register(ref_prep, mov_prep, ref_mask, mov_mask)
                 log_hardware_usage("Post-Rigid Registration")
@@ -503,16 +502,16 @@ class AlignmentPipeline:
                 mov_mask_w = np.squeeze(mov_mask_w)
                 mov_mask_w = (mov_mask_w > 0.5).astype(bool)  # binarize
                 
-                # Crop reference for optical flow
-                ref_prep_crop = np.squeeze(ref_prep[y0:y1, x0:x1]).astype(np.float32)
+                # Crop reference for optical flow (uses raw image, Flow handles its own CLAHE)
+                ref_raw_crop = np.squeeze(ref_img[y0:y1, x0:x1]).astype(np.float32)
                 ref_mask_crop = np.squeeze(ref_mask[y0:y1, x0:x1]).astype(bool)
                 aligned_img = np.squeeze(aligned_img).astype(np.float32)
                 logger.debug(
-                    f"Non-rigid shapes: ref={ref_prep_crop.shape}, aligned={aligned_img.shape}, "
+                    f"Non-rigid shapes: ref={ref_raw_crop.shape}, aligned={aligned_img.shape}, "
                     f"ref_mask={ref_mask_crop.shape}, mov_mask={mov_mask_w.shape}"
                 )
                 aligned_img, base_ncc, final_ncc = self.nonrigid_registrar.refine(
-                    ref_prep_crop, aligned_img, ref_mask_crop, mov_mask_w
+                    ref_raw_crop, aligned_img, ref_mask_crop, mov_mask_w
                 )
                 logger.info(f"Non-rigid alignment complete (NCC: {base_ncc:.4f} -> {final_ncc:.4f})")
                 log_hardware_usage("Post-Optical Flow")
@@ -524,7 +523,7 @@ class AlignmentPipeline:
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
             
             if not skip_registration:
-                save_debug_overlay(ref_prep[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+                save_debug_overlay(ref_img[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
                 
             # Force Garbage Collection to prevent VRAM accumulation
             del mov_img, mov_img_crop, aligned_img
