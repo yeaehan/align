@@ -424,7 +424,7 @@ class AlignmentPipeline:
                 clear_gpu_memory()
 
                 # Rigid Registration
-                logger.info("Running Rigid Registration...")
+                logger.info("🔍 Multi-scale registration...")
                 
                 # --- PROXY SCALING (From Notebook Optimization) ---
                 # The notebook limits registration to `refine_max_dim=4096`.
@@ -510,6 +510,7 @@ class AlignmentPipeline:
                 logger.warning("Skipping Optical Flow for non-anchor channel (Requires saving flow field). Applying rigid warp only.")
 
             # Output Generation
+            logger.info("💾 Saving...")
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
             
             if not skip_registration:
@@ -522,5 +523,6 @@ class AlignmentPipeline:
             import gc
             gc.collect()
             clear_gpu_memory()
+            logger.info("🗑️  Cleaned up memory")
             
         logger.info("Pipeline completed successfully!")

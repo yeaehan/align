@@ -224,6 +224,7 @@ class OpticalFlowRegistrar:
 
         current_s  = mov_s.copy()
         current_ncc = _ncc(current_s)
+        logger.info(f"    Baseline: {current_ncc:.4f}")
 
         n_passes = 3 if self.enable_pass3 else 2
 
