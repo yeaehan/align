@@ -127,7 +127,7 @@ def preprocess_dapi_gpu(
         img = 1.0 - img
 
     # top-hat = image - opening (background estimate)
-    background = grey_opening(img, structure=kernel)
+    background = grey_opening(img, footprint=kernel)
     img = img - background
 
     if light_background:
@@ -180,7 +180,7 @@ def preprocess_dapi_cpu(
     if light_background:
         img = 1.0 - img
 
-    background = grey_opening(img, structure=kernel)
+    background = grey_opening(img, footprint=kernel)
     img = img - background
 
     if light_background:
