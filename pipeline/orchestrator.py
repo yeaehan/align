@@ -377,10 +377,10 @@ class AlignmentPipeline:
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
             
             if not skip_registration:
-                save_debug_overlay(ref_img[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+                save_debug_overlay(ref_img, aligned_img, str(out_dir / f"qc_{mov_path.name}"))
                 
             # Force Garbage Collection to prevent VRAM accumulation
-            del mov_img, mov_img_crop, aligned_img
+            del mov_img, aligned_img
             if not skip_registration:
                 del mov_mask
             import gc
