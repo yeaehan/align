@@ -321,7 +321,7 @@ class RigidRegistrar:
         best_method    = "Identity"
 
         for scale_factor in self.pyramid_levels:
-            logger.debug(f"Rigid registration at scale {scale_factor}")
+            logger.info(f"   📍 Scale {scale_factor}")
 
             # downsample to this pyramid level
             ref_s      = resize_image(ref,      scale_factor, is_mask=False)
@@ -344,6 +344,8 @@ class RigidRegistrar:
                 baseline_ncc = compute_weighted_ncc(ref_s, mov_w, w_map)
             else:
                 baseline_ncc = 0.0
+                
+            logger.info(f"      Baseline: {baseline_ncc:.4f}")
 
             best_local     = identity()
             best_local_ncc = baseline_ncc
@@ -359,9 +361,13 @@ class RigidRegistrar:
                 T_phase, phase_ncc = register_phase(ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, mov_mask_w)
                 if phase_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_phase, phase_ncc, "Phase"
-                    logger.debug(f"  Phase: NCC={phase_ncc:.4f}")
+                    shift_x = T_phase[0, 2]
+                    shift_y = T_phase[1, 2]
+                    logger.info(f"      Phase: {phase_ncc:.4f} (shift=[{shift_y:.1f}, {shift_x:.1f}])")
+                else:
+                    logger.info(f"      Phase: {phase_ncc:.4f}")
             except Exception as e:
-                logger.debug(f"  Phase failed: {e}")
+                logger.info(f"      Phase failed: {e}")
 
             # --- ECC (initialized with best so far) ---
             try:
@@ -370,20 +376,26 @@ class RigidRegistrar:
                 )
                 if ecc_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_ecc, ecc_ncc, "ECC"
-                    logger.debug(f"  ECC: NCC={ecc_ncc:.4f}")
+                    logger.info(f"      ECC: {ecc_ncc:.4f}")
             except Exception as e:
                 logger.debug(f"  ECC failed: {e}")
 
             # --- Feature-based ---
-            try:
-                T_feat, feat_ncc = self.feature_reg.register(
-                    ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, mov_mask_w
-                )
-                if feat_ncc > best_local_ncc:
-                    best_local, best_local_ncc, best_local_method = T_feat, feat_ncc, "Feature"
-                    logger.debug(f"  Feature: NCC={feat_ncc:.4f}")
-            except Exception as e:
-                logger.debug(f"  Feature failed: {e}")
+            if best_local_ncc >= 0.94:
+                logger.info(f"      ⏭️  Skipping features (NCC already good: {best_local_ncc:.4f})")
+            else:
+                logger.info("      🔧 Trying features...")
+                try:
+                    T_feat, feat_ncc = self.feature_reg.register(
+                        ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, mov_mask_w
+                    )
+                    if feat_ncc > best_local_ncc:
+                        best_local, best_local_ncc, best_local_method = T_feat, feat_ncc, "Feature"
+                        logger.info(f"      ✅ Features improved to {feat_ncc:.4f}")
+                    else:
+                        logger.info(f"      ⚠️  Features didn't help (NCC={feat_ncc:.4f})")
+                except Exception as e:
+                    logger.info(f"      Feature failed: {e}")
 
             # accept if not worse than baseline by more than 1%
             if best_local_ncc >= baseline_ncc - 0.01:
@@ -391,7 +403,9 @@ class RigidRegistrar:
                 current_scale = scale_factor
                 best_ncc      = best_local_ncc
                 best_method   = f"{best_local_method}@{scale_factor}"
-                logger.info(f"Scale {scale_factor}: {best_method}, NCC={best_ncc:.4f}")
+                logger.info(f"      📊 Final for scale {scale_factor}: {best_local_method}, NCC={best_ncc:.4f}")
+            else:
+                logger.info(f"      📊 Rejected transform, falling back to previous scale.")
 
         # scale translation back to full resolution
         final_transform = scale_affine_translation(accumulated, 1.0 / current_scale)
@@ -399,6 +413,7 @@ class RigidRegistrar:
         # Log transform details for debugging
         logger.debug(f"Final accumulated transform (before upscale) @ scale {current_scale}: {accumulated}")
         logger.debug(f"Final transform (after upscale to full resolution): {final_transform}")
-        logger.info(f"Final transform translations: tx={final_transform[0,2]:.3f}, ty={final_transform[1,2]:.3f}")
+        logger.debug(f"Final transform translations: tx={final_transform[0,2]:.3f}, ty={final_transform[1,2]:.3f}")
+        logger.info(f" 📊 Rigid: {best_method}, NCC={best_ncc:.4f}")
         
         return final_transform, best_ncc, best_method

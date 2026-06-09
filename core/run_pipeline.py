@@ -75,12 +75,15 @@ def main():
             logger.error("No batches found to process.")
             return
         
-        logger.info(f"Starting batch processing for {len(batches)} batches.")
+        logger.info("\n" + "="*80)
+        logger.info(f"🎯 BATCH PROCESSING: {len(batches)} batches found")
+        logger.info("="*80 + "\n")
         
         for batch_name, batch_data in batches.items():
-            logger.info("\n" + "="*50)
-            logger.info(f" Processing Batch: {batch_name}")
-            logger.info("="*50)
+            logger.info("\n" + "="*80)
+            logger.info(f"📦 BATCH {list(batches.keys()).index(batch_name) + 1}/{len(batches)}: {batch_name}")
+            logger.info(f"   Files: {len(batch_data['files'])}")
+            logger.info("="*80 + "\n")
             
             b_dir = batch_data['dir']
             b_files = batch_data['files']
@@ -132,7 +135,8 @@ def main():
                 pipeline = AlignmentPipeline(config)
                 pipeline.run()
                 
-        logger.info("\nBatch processing completed successfully!")
+            logger.info("\n🧹 Cleaning up between batches...")
+        logger.info("\n✅ BATCH PROCESSING COMPLETED")
         return
 
     if args.is_3d:
