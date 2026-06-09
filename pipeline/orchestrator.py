@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import subprocess
+import re
 
 import numpy as np
 import cv2
@@ -10,7 +11,7 @@ from align.io.reader import read_2d_as_float, discover_moving_files
 from align.io.writer import save_tiff, save_debug_overlay
 from align.core.tissue import TissueProcessor
 from align.core.preprocessing import preprocess_dapi
-from align.core.transforms import warp_affine
+from align.core.transforms import warp_affine, identity
 from align.registration.rigid import RigidRegistrar
 from align.registration.nonrigid import OpticalFlowRegistrar
 
@@ -372,9 +373,23 @@ class AlignmentPipeline:
         else:
             moving_files = discover_moving_files(ref_path)
         logger.info(f"Found {len(moving_files)} moving files to align.")
+        
+        # Sort files to ensure anchor channels (ch00) are processed first
+        moving_files = sorted(
+            moving_files, 
+            key=lambda x: (0 if any(p in x.lower() for p in self.config.dapi_patterns) else 1, x)
+        )
 
         out_dir = Path(self.config.output_folder)
         out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Helper to group files by round (strips off '_ch01.tif', etc.)
+        def get_group_key(filename):
+            match = re.search(r'[_\\-]ch\d+', filename, re.IGNORECASE)
+            return filename[:match.start()] if match else filename
+            
+        ref_group_key = get_group_key(ref_path.name)
+        transform_cache = {}
 
         # 3. Align each file to the reference
         for mov_file in moving_files:
@@ -382,24 +397,41 @@ class AlignmentPipeline:
             logger.info(f"--- Aligning {mov_path.name} ---")
             log_hardware_usage("Pre-Registration")
             
+            group_key = get_group_key(mov_path.name)
+            is_anchor = any(p in mov_path.name.lower() for p in self.config.dapi_patterns)
+            
+            if group_key == ref_group_key:
+                logger.info("File belongs to the reference round. Bypassing registration.")
+                transform = identity()
+                skip_registration = True
+            elif is_anchor or group_key not in transform_cache:
+                skip_registration = False
+            else:
+                logger.info(f"Using cached rigid transform for round: {group_key}")
+                transform = transform_cache[group_key]
+                skip_registration = True
+            
             logger.info("Reading moving image (Network I/O)...")
             mov_img = read_2d_as_float(str(mov_path))
             
-            logger.info("Preprocessing moving image...")
-            mov_prep = self._preprocess_large_image(mov_img)
-            clear_gpu_memory()
-            
-            logger.info("Creating moving tissue mask...")
-            mov_mask = TissueProcessor.create_tissue_mask(mov_prep, self.config.tissue_mask_percentile)
-            clear_gpu_memory()
+            if not skip_registration:
+                logger.info("Preprocessing moving image...")
+                mov_prep = self._preprocess_large_image(mov_img)
+                clear_gpu_memory()
+                
+                logger.info("Creating moving tissue mask...")
+                mov_mask = TissueProcessor.create_tissue_mask(mov_prep, self.config.tissue_mask_percentile)
+                clear_gpu_memory()
 
-            # Rigid Registration
-            logger.info("Running Rigid Registration...")
-            transform, rigid_ncc, method = self.rigid_registrar.register(
-                ref_prep, mov_prep, ref_mask, mov_mask
-            )
-            logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
-            log_hardware_usage("Post-Rigid Registration")
+                # Rigid Registration
+                logger.info("Running Rigid Registration...")
+                transform, rigid_ncc, method = self.rigid_registrar.register(
+                    ref_prep, mov_prep, ref_mask, mov_mask
+                )
+                logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
+                log_hardware_usage("Post-Rigid Registration")
+                
+                transform_cache[group_key] = transform
             
             # Compute overlap crop box to handle large images (>32k pixels)
             logger.info("Computing overlap crop box...")
@@ -432,7 +464,7 @@ class AlignmentPipeline:
             aligned_img = self._warp_tiled(mov_img_crop, transform_src, (crop_h, crop_w))
 
             # Non-Rigid Registration (Optical flow)
-            if self.config.enable_nonrigid:
+            if self.config.enable_nonrigid and not skip_registration:
                 logger.info("Running Non-Rigid Registration (Optical Flow)...")
                 # For optical flow, also need to warp the mask - extract same region
                 mov_mask_crop = mov_mask[src_y0:src_y1, src_x0:src_x1]
@@ -453,9 +485,21 @@ class AlignmentPipeline:
                 )
                 logger.info(f"Non-rigid alignment complete (NCC: {base_ncc:.4f} -> {final_ncc:.4f})")
                 log_hardware_usage("Post-Optical Flow")
+            elif self.config.enable_nonrigid and skip_registration and group_key != ref_group_key:
+                logger.warning("Skipping Optical Flow for non-anchor channel (Requires saving flow field). Applying rigid warp only.")
 
             # Output Generation
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
-            save_debug_overlay(ref_prep[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+            
+            if not skip_registration:
+                save_debug_overlay(ref_prep[y0:y1, x0:x1], aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+                
+            # Force Garbage Collection to prevent VRAM accumulation
+            del mov_img, mov_img_crop, aligned_img
+            if not skip_registration:
+                del mov_prep, mov_mask
+            import gc
+            gc.collect()
+            clear_gpu_memory()
             
         logger.info("Pipeline completed successfully!")
