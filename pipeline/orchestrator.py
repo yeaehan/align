@@ -326,15 +326,22 @@ class AlignmentPipeline:
         if h * w < 200_000_000:
             return preprocess_dapi(img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
         
-        logger.info(f"Image is massive ({w}x{h}). Preprocessing in tiles to prevent GPU swap/freeze...")
+        logger.info(f"   🧱 Image is massive ({w}x{h}). Preprocessing in tiles to prevent GPU swap/freeze...")
         result = np.zeros_like(img, dtype=np.float32)
-        tile_size = 10000
+        tile_size = 8192
         margin = self.config.preprocessing_tophat_radius + 20
         
-        for y0 in range(0, h, tile_size):
+        y_steps = list(range(0, h, tile_size))
+        x_steps = list(range(0, w, tile_size))
+        total_tiles = len(y_steps) * len(x_steps)
+        
+        tile_idx = 1
+        for y0 in y_steps:
             y1 = min(y0 + tile_size, h)
-            for x0 in range(0, w, tile_size):
+            for x0 in x_steps:
                 x1 = min(x0 + tile_size, w)
+                
+                logger.info(f"      ⚙️ Processing tile {tile_idx}/{total_tiles} [{y0}:{y1}, {x0}:{x1}]...")
                 
                 py0, py1 = max(0, y0 - margin), min(h, y1 + margin)
                 px0, px1 = max(0, x0 - margin), min(w, x1 + margin)
@@ -344,6 +351,7 @@ class AlignmentPipeline:
                 cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
                 cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
                 result[y0:y1, x0:x1] = tile_prep[cy0:cy1, cx0:cx1]
+                tile_idx += 1
         return result
 
     def run(self):
@@ -415,12 +423,8 @@ class AlignmentPipeline:
             mov_img = read_2d_as_float(str(mov_path))
             
             if not skip_registration:
-                logger.info("Preprocessing moving image...")
-                mov_prep = self._preprocess_large_image(mov_img)
-                clear_gpu_memory()
-                
                 logger.info("Creating moving tissue mask...")
-                mov_mask = TissueProcessor.create_tissue_mask(mov_prep, self.config.tissue_mask_percentile)
+                mov_mask = TissueProcessor.create_tissue_mask(mov_img, self.config.tissue_mask_percentile)
                 clear_gpu_memory()
 
                 # Rigid Registration
@@ -429,17 +433,21 @@ class AlignmentPipeline:
                 # --- PROXY SCALING (From Notebook Optimization) ---
                 # The notebook limits registration to `refine_max_dim=4096`.
                 # We cap at 8192 to guarantee it runs in seconds while keeping high accuracy.
-                h_mov, w_mov = mov_prep.shape
+                h_mov, w_mov = mov_img.shape
                 h_ref, w_ref = ref_prep.shape
                 max_dim = max(h_mov, w_mov, h_ref, w_ref)
                 max_rigid_dim = 8192.0
                 
                 if max_dim > max_rigid_dim:
                     proxy_scale = max_rigid_dim / max_dim
-                    logger.info(f"Image is {max_dim}px. Downscaling to {max_rigid_dim}px proxy for instant rigid registration...")
+                    logger.info(f"   📐 Image is {max_dim}px. Downscaling to {max_rigid_dim}px proxy for instant rigid registration...")
                     
                     ref_proxy = cv2.resize(ref_prep, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
-                    mov_proxy = cv2.resize(mov_prep, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
+                    mov_proxy_raw = cv2.resize(mov_img, (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_AREA)
+                    
+                    logger.info("   ⚡ Preprocessing moving proxy (instant)...")
+                    mov_proxy = preprocess_dapi(mov_proxy_raw, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
+                    
                     ref_mask_p = cv2.resize(ref_mask.astype(np.uint8), (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_NEAREST).astype(bool)
                     mov_mask_p = cv2.resize(mov_mask.astype(np.uint8), (0,0), fx=proxy_scale, fy=proxy_scale, interpolation=cv2.INTER_NEAREST).astype(bool)
                     
@@ -448,6 +456,8 @@ class AlignmentPipeline:
                     transform[0, 2] /= proxy_scale
                     transform[1, 2] /= proxy_scale
                 else:
+                    logger.info("   ⚡ Preprocessing moving image...")
+                    mov_prep = preprocess_dapi(mov_img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
                     transform, rigid_ncc, method = self.rigid_registrar.register(ref_prep, mov_prep, ref_mask, mov_mask)
                 log_hardware_usage("Post-Rigid Registration")
                 logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
@@ -519,7 +529,7 @@ class AlignmentPipeline:
             # Force Garbage Collection to prevent VRAM accumulation
             del mov_img, mov_img_crop, aligned_img
             if not skip_registration:
-                del mov_prep, mov_mask
+                del mov_mask
             import gc
             gc.collect()
             clear_gpu_memory()
