@@ -68,6 +68,8 @@ _Config = RegistrationConfig | ZStackConfig
 def register_phase(
     ref: np.ndarray,
     mov: np.ndarray,
+    ref_u8: np.ndarray,
+    mov_u8: np.ndarray,
     ref_mask: np.ndarray,
     mov_mask: np.ndarray,
 ) -> Tuple[np.ndarray, float]:
@@ -76,7 +78,8 @@ def register_phase(
 
     Parameters
     ----------
-    ref, mov   : 2D float images (CLAHE-enhanced uint8 expected)
+    ref, mov   : 2D float images
+    ref_u8, mov_u8: 2D CLAHE-enhanced uint8 images
     ref_mask   : binary tissue mask for ref
     mov_mask   : binary tissue mask for mov
 
@@ -84,8 +87,6 @@ def register_phase(
     -------
     (transform_2x3, ncc_score)
     """
-    ref_u8 = apply_clahe(normalize_to_uint8(ref))
-    mov_u8 = apply_clahe(normalize_to_uint8(mov))
 
     shift, _, _ = phase_cross_correlation(ref_u8, mov_u8, upsample_factor=10)
 
@@ -104,6 +105,8 @@ def register_phase(
 def register_ecc(
     ref: np.ndarray,
     mov: np.ndarray,
+    ref_u8: np.ndarray,
+    mov_u8: np.ndarray,
     ref_mask: np.ndarray,
     init_transform: np.ndarray,
     max_iterations: int = 100,
@@ -129,9 +132,6 @@ def register_ecc(
     (transform_2x3, ncc_score)
         Returns (identity, 0.0) if ECC fails to converge.
     """
-    ref_u8 = apply_clahe(normalize_to_uint8(ref))
-    mov_u8 = apply_clahe(normalize_to_uint8(mov))
-
     ecc_ref  = ref_u8.astype(np.float32) / 255.0
     ecc_mov  = mov_u8.astype(np.float32) / 255.0
     criteria = (
@@ -195,6 +195,8 @@ class FeatureBasedRegistration:
         self,
         ref: np.ndarray,
         mov: np.ndarray,
+        ref_u8: np.ndarray,
+        mov_u8: np.ndarray,
         ref_mask: np.ndarray,
         mov_mask: np.ndarray,
     ) -> Tuple[np.ndarray, float]:
@@ -206,8 +208,6 @@ class FeatureBasedRegistration:
         (transform_2x3, ncc_score)
             Returns (identity, 0.0) if not enough matches found.
         """
-        ref_u8 = apply_clahe(normalize_to_uint8(ref))
-        mov_u8 = apply_clahe(normalize_to_uint8(mov))
         ref_mask_u8 = ref_mask.astype(np.uint8) * 255
         mov_mask_u8 = mov_mask.astype(np.uint8) * 255
 
@@ -348,10 +348,15 @@ class RigidRegistrar:
             best_local     = identity()
             best_local_ncc = baseline_ncc
             best_local_method = "Baseline"
+            
+            # --- HOISTED CLAHE PREPROCESSING ---
+            # Calculate CLAHE enhanced images exactly ONCE per scale instead of inside every method!
+            ref_u8 = apply_clahe(normalize_to_uint8(ref_s))
+            mov_u8 = apply_clahe(normalize_to_uint8(mov_w))
 
             # --- Phase correlation ---
             try:
-                T_phase, phase_ncc = register_phase(ref_s, mov_w, ref_mask_s, mov_mask_w)
+                T_phase, phase_ncc = register_phase(ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, mov_mask_w)
                 if phase_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_phase, phase_ncc, "Phase"
                     logger.debug(f"  Phase: NCC={phase_ncc:.4f}")
@@ -361,7 +366,7 @@ class RigidRegistrar:
             # --- ECC (initialized with best so far) ---
             try:
                 T_ecc, ecc_ncc = register_ecc(
-                    ref_s, mov_w, ref_mask_s, identity()
+                    ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, identity()
                 )
                 if ecc_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_ecc, ecc_ncc, "ECC"
@@ -372,7 +377,7 @@ class RigidRegistrar:
             # --- Feature-based ---
             try:
                 T_feat, feat_ncc = self.feature_reg.register(
-                    ref_s, mov_w, ref_mask_s, mov_mask_w
+                    ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, mov_mask_w
                 )
                 if feat_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_feat, feat_ncc, "Feature"
