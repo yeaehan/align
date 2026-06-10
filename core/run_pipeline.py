@@ -1,81 +1,46 @@
 import argparse
 import logging
 from pathlib import Path
+import re
 import numpy as np
 import tifffile
 
 from align.config import RegistrationConfig, ZStackConfig
-from align.io.reader import discover_moving_files, find_reference_file
-from align.io.lif import LifImageReader
+from align.io.reader import discover_moving_files, find_reference_file, expand_virtual_files
 from align.pipeline.orchestrator import AlignmentPipeline
 from align.pipeline.zstack import ZStackAlignmentPipeline
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def auto_extract_lifs(target_dir: Path) -> Path:
-    """Automatically extracts .lif files to a subdirectory and returns the new directory."""
-    lif_files = [f for f in target_dir.iterdir() if f.is_file() and f.suffix.lower() == '.lif']
-    if not lif_files:
-        return target_dir
-        
-    out_dir = target_dir / "extracted_tiffs"
-    if out_dir.exists() and any(f.suffix.lower() in {'.tif', '.tiff'} for f in out_dir.iterdir()):
-        logger.info(f"Using previously extracted TIFFs in {out_dir.name}/")
-        return out_dir
-        
-    out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"📦 Found {len(lif_files)} LIF files. Auto-extracting channels...")
-    
-    for lif_file in lif_files:
-        try:
-            reader = LifImageReader(str(lif_file))
-            merged_idx = reader.get_merged_scene_idx()
-            scene_info = reader.get_scene_info(merged_idx)
-            
-            logger.info(f"  -> Extracting '{lif_file.name}' (Scene: '{scene_info['name']}')")
-            
-            for c in range(scene_info['channels']):
-                # Utilize lif.py's robust extraction and float32 normalization
-                mip = reader.read_channel_as_float(channel_idx=c, scene_idx=merged_idx, use_mip=True)
-                
-                suffix = f"_ch{c:02d}_MIP" if scene_info['dims'][0] > 1 else f"_ch{c:02d}"
-                safe_name = "".join([char if char.isalnum() or char in " _-" else "_" for char in scene_info['name']])
-                out_file = out_dir / f"{lif_file.stem}_{safe_name}{suffix}.tif"
-                
-                # Convert back to uint16 for saving the extracted TIFF
-                tifffile.imwrite(out_file, (mip * 65535.0).astype(np.uint16))
-        except Exception as e:
-            logger.error(f"Failed to extract {lif_file.name}: {e}")
-            
-    return out_dir
-
 def get_batches(input_dir: Path, delim: str = "_"):
     """Auto-detect batch processing mode (nested folders vs flat prefix-based files)."""
-    subdirs = [d for d in input_dir.iterdir() if d.is_dir() and d.name != "extracted_tiffs"]
+    subdirs = [d for d in input_dir.iterdir() if d.is_dir()]
     
-    # Check root directory for LIFs as well
-    input_dir = auto_extract_lifs(input_dir)
-    
-    tiff_extensions = {'.tif', '.tiff', '.TIF', '.TIFF'}
-    tiff_files = [f for f in input_dir.iterdir() if f.is_file() and f.suffix in tiff_extensions]
+    image_extensions = {'.tif', '.tiff', '.TIF', '.TIFF', '.lif', '.LIF'}
+    image_files = [f for f in input_dir.iterdir() if f.is_file() and f.suffix in image_extensions]
 
     batches = {}
 
-    if len(subdirs) > 0 and len(tiff_files) == 0:
+    if len(subdirs) > 0 and len(image_files) == 0:
         logger.info("Auto-detected NESTED batch mode (subfolders found).")
         for d in subdirs:
-            d_extracted = auto_extract_lifs(d)
-            tiffs = [f for f in d_extracted.iterdir() if f.is_file() and f.suffix in tiff_extensions]
-            if tiffs:
-                batches[d.name] = {'files': tiffs, 'dir': d_extracted}
+            files = [f for f in d.iterdir() if f.is_file() and f.suffix in image_extensions]
+            if files:
+                batches[d.name] = {'files': files, 'dir': d}
     else:
-        if len(subdirs) > 0 and len(tiff_files) > 0:
-            logger.warning("Found both subdirectories and TIFF files in the root. Defaulting to FLAT batch mode for root TIFFs.")
-        logger.info(f"Auto-detected FLAT batch mode (TIFFs found in root). Grouping by prefix '{delim}'.")
-        for f in tiff_files:
-            # Everything before the first delimiter becomes the sample name
-            sample_name = f.name.split(delim)[0]
+        if len(subdirs) > 0 and len(image_files) > 0:
+            logger.warning("Found both subdirectories and image files in the root. Defaulting to FLAT batch mode for root images.")
+        logger.info("Auto-detected FLAT batch mode (TIFFs found in root). Grouping by sample name (letters followed by numbers).")
+        for f in image_files:
+            # Extract sample name: optional letters followed by numbers (e.g., 'DGC156', '126', 'Gonadal_DGC156' -> 'DGC156')
+            match = re.search(r'[A-Za-z]*\d+', f.name)
+            if match:
+                sample_name = match.group(0)
+            else:
+                # Fallback if no numbers are found in the filename
+                sample_name = f.name.split(delim)[0]
+                
             if sample_name not in batches:
                 batches[sample_name] = {'files': [], 'dir': input_dir}
             batches[sample_name]['files'].append(f)
@@ -113,9 +78,6 @@ def main():
     if not input_dir.exists():
         logger.error(f"Input folder does not exist: {input_dir}")
         return
-        
-    # Auto-extract LIF files if present in the root target folder
-    input_dir = auto_extract_lifs(input_dir)
 
     if args.batch:
         batches = get_batches(input_dir)
@@ -123,15 +85,15 @@ def main():
             logger.error("No batches found to process.")
             return
         
-        logger.info("\n" + "="*80)
+        logger.info("\n" + "=" * 80)
         logger.info(f"🎯 BATCH PROCESSING: {len(batches)} batches found")
-        logger.info("="*80 + "\n")
+        logger.info("=" * 80 + "\n")
         
         for batch_name, batch_data in batches.items():
-            logger.info("\n" + "="*80)
+            logger.info("\n" + "=" * 80)
             logger.info(f"📦 BATCH {list(batches.keys()).index(batch_name) + 1}/{len(batches)}: {batch_name}")
             logger.info(f"   Files: {len(batch_data['files'])}")
-            logger.info("="*80 + "\n")
+            logger.info("=" * 80 + "\n")
             
             b_dir = batch_data['dir']
             b_files = batch_data['files']
@@ -139,15 +101,16 @@ def main():
             
             if args.is_3d:
                 ref_file = None
-                for f in b_files:
-                    if '_ref' in f.name.lower():
-                        ref_file = str(f)
+                # In 3D, we don't use virtual files, just find the physical _ref file
+                for f_phys in b_files:
+                    if '_ref' in f_phys.name.lower():
+                        ref_file = str(f_phys)
                         break
                 if not ref_file:
                     logger.warning(f"No '_ref' file found for batch '{batch_name}'. Skipping.")
                     continue
                     
-                moving_files = [str(f) for f in b_files if str(f) != ref_file]
+                moving_files = [str(f_phys) for f_phys in b_files if str(f_phys) != ref_file]
                 config = ZStackConfig(
                     reference_zstack_63x=ref_file,
                     moving_images_20x=moving_files,
@@ -159,17 +122,20 @@ def main():
                 
             else: # 2D
                 ref_channel = args.ref.lower()
+                virtual_files = expand_virtual_files(b_files)
                 ref_file = None
-                for f in b_files:
-                    if ref_channel in f.stem.lower():
-                        ref_file = str(f)
+                for vf in virtual_files:
+                    # Use the virtual filename for matching
+                    vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
+                    if ref_channel in vf_name.lower():
+                        ref_file = vf
                         break
                 
                 if not ref_file:
                     logger.warning(f"No reference matching '{args.ref}' found for batch '{batch_name}'. Skipping.")
                     continue
                     
-                moving_files = [str(f) for f in b_files if str(f) != ref_file]
+                moving_files = [vf for vf in virtual_files if vf != ref_file]
                 config = RegistrationConfig(
                     input_folder=str(b_dir),
                     output_folder=str(out_dir),
@@ -184,7 +150,7 @@ def main():
                 pipeline.run()
                 
             logger.info("\n🧹 Cleaning up between batches...")
-        logger.info("\n✅ BATCH PROCESSING COMPLETED")
+        logger.info("\n✅ BATCH PROCESSING COMPLETED!")
         return
 
     if args.is_3d:
@@ -220,31 +186,36 @@ def main():
         return
     
     # 1. Find reference file by channel name
-    # Find all TIFF files in the input folder
-    tiff_extensions = {'.tif', '.tiff', '.TIF', '.TIFF'}
-    all_files = [
+    image_extensions = {'.tif', '.tiff', '.TIF', '.TIFF', '.lif', '.LIF'}
+    all_physical_files = [
         p for p in input_dir.iterdir()
-        if p.is_file() and p.suffix in tiff_extensions
+        if p.is_file() and p.suffix in image_extensions
     ]
     
-    if not all_files:
-        logger.error(f"No TIFF files found in {input_dir}")
+    if not all_physical_files:
+        logger.error(f"No image files found in {input_dir}")
         return
+    
+    virtual_files = expand_virtual_files(all_physical_files)
     
     # Find reference file matching the channel name
     ref_channel = args.ref.lower()
     reference_file = None
-    for f in all_files:
-        if ref_channel in f.stem.lower():
-            reference_file = str(f)
+    for vf in virtual_files:
+        vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
+        if ref_channel in vf_name.lower():
+            reference_file = vf
             break
     
     if reference_file is None:
         logger.error(f"No file matching channel '{args.ref}' found in {input_dir}")
-        logger.info(f"Available files: {[f.name for f in all_files]}")
+        logger.info(f"Available files: {virtual_files}")
         return
     
-    logger.info(f"Using reference file: {Path(reference_file).name}")
+    printable_ref = reference_file.split("\\")[-1].split("/")[-1]
+    logger.info(f"Using reference file: {printable_ref}")
+    
+    moving_files = [vf for vf in virtual_files if vf != reference_file]
     
     # 2. Instantiate the dataclass with command-line arguments
     config = RegistrationConfig(
@@ -252,6 +223,7 @@ def main():
         output_folder=args.output_folder,
         reference_file=reference_file,
         n_workers=args.n_workers,
+        moving_files=moving_files,
         use_gpu=not args.no_gpu,
         use_gpu_transforms=not args.no_gpu,
         enable_nonrigid=not args.disable_nonrigid
@@ -260,7 +232,7 @@ def main():
     logger.info("Configuration loaded successfully:")
     logger.info(f"  Input: {config.input_folder}")
     logger.info(f"  Output: {config.output_folder}")
-    logger.info(f"  Reference: {Path(config.reference_file).name}")
+    logger.info(f"  Reference: {printable_ref}")
     logger.info(f"  GPU Enabled: {config.use_gpu}")
     logger.info(f"  Non-rigid alignment: {config.enable_nonrigid}")
     
