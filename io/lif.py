@@ -84,7 +84,7 @@ class LifImageReader:
         
         z_stack = np.zeros((img.dims.z, img.dims.y, img.dims.x), dtype=np.float32)
         for z in range(img.dims.z):
-            plane = np.array(img.get_plane(z=z, c=channel_idx, t=0))
+            plane = np.array(img.get_frame(z=z, c=channel_idx, t=0))
             z_stack[z] = _to_float32(plane)
             
         if img.dims.z > 1:
