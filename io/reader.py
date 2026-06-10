@@ -75,6 +75,14 @@ def read_2d_as_float(
     -------
     float32 array of shape (H, W), values in [0, 1]
     """
+    if "::" in str(path):
+        file_path, ch_info = str(path).split("::")
+        path = file_path
+        if ch_info.lower().startswith("ch"):
+            channel_idx = int(ch_info[2:])
+        else:
+            channel_idx = int(ch_info)
+
     p = Path(path)
     if p.suffix.lower() == ".lif":
         from align.io.lif import LifImageReader  # Lazy import breaks circular dependency
@@ -137,6 +145,14 @@ def read_zstack(path: str, channel_idx: int = 0, scene_idx: Optional[int] = None
     ------
     ValueError if the file is not a 3D or 4D array
     """
+    if "::" in str(path):
+        file_path, ch_info = str(path).split("::")
+        path = file_path
+        if ch_info.lower().startswith("ch"):
+            channel_idx = int(ch_info[2:])
+        else:
+            channel_idx = int(ch_info)
+
     p = Path(path)
     if p.suffix.lower() == ".lif":
         from align.io.lif import LifImageReader
@@ -145,7 +161,7 @@ def read_zstack(path: str, channel_idx: int = 0, scene_idx: Optional[int] = None
         img = lif_reader.lif.get_image(scene_data['scene_idx'])
         z_stack = np.zeros((img.dims.z, img.dims.y, img.dims.x), dtype=np.float32)
         for z in range(img.dims.z):
-            plane = np.array(img.get_plane(z=z, c=channel_idx, t=0))
+            plane = np.array(img.get_frame(z=z, c=channel_idx, t=0))
             z_stack[z] = _to_float32(plane)
         return z_stack, img.dims.z
 
@@ -266,15 +282,37 @@ def replicate_to_zstack(
 # FILE DISCOVERY
 # ============================================================================
 
-_TIFF_EXTENSIONS = (".tif", ".tiff")
+_IMAGE_EXTENSIONS = (".tif", ".tiff", ".lif")
 
 # Suffixes that identify a file as already processed (skip these)
 _SKIP_PATTERNS = ("crop_aligned2dot3d", "debug_ch00_alignment")
 
 
+def expand_virtual_files(file_paths: List[Path]) -> List[str]:
+    """
+    Expands a list of physical file paths into 'virtual' files.
+    For TIFFs, the virtual path is identical to the physical path.
+    For LIFs, it probes the file and returns a path per channel: 'file.lif::ch00', etc.
+    """
+    virtual_files = []
+    for f in file_paths:
+        if f.suffix.lower() == '.lif':
+            try:
+                from align.io.lif import LifImageReader
+                reader = LifImageReader(str(f))
+                scene_idx = reader.get_merged_scene_idx()
+                scene_info = reader.get_scene_info(scene_idx)
+                for c in range(scene_info['channels']):
+                    virtual_files.append(f"{f}::ch{c:02d}")
+            except Exception as e:
+                logger.error(f"Failed to scan LIF {f.name}: {e}")
+        else:
+            virtual_files.append(str(f))
+    return sorted(virtual_files)
+
 def find_reference_candidates(
     folder: Path,
-    extensions: tuple = _TIFF_EXTENSIONS,
+    extensions: tuple = _IMAGE_EXTENSIONS,
 ) -> List[Path]:
     return sorted([
         p for p in folder.iterdir()
@@ -287,8 +325,8 @@ def find_reference_candidates(
 
 
 def discover_moving_files(
-    reference_path: Path,
-    extensions: tuple = _TIFF_EXTENSIONS,
+    reference_file: str,
+    extensions: tuple = _IMAGE_EXTENSIONS,
 ) -> List[str]:
     """
     Discover all non-reference TIFFs in the same folder as the reference file.
@@ -301,24 +339,30 @@ def discover_moving_files(
 
     Parameters
     ----------
-    reference_path : path to the reference file
+    reference_file : path to the reference file (can be virtual, e.g. 'file.lif::ch00')
 
     Returns
     -------
     Sorted list of absolute path strings
     """
-    ref_path = reference_path.resolve()
-    folder   = ref_path.parent
+    if "::" in str(reference_file):
+        ref_real_path = Path(str(reference_file).split("::")[0])
+    else:
+        ref_real_path = Path(reference_file)
+        
+    ref_path = ref_real_path.resolve()
+    folder = ref_path.parent
 
-    files = sorted([
-        str(p) for p in folder.iterdir()
-        if p.is_file()
-        and p.suffix.lower() in extensions
-        and p.resolve() != ref_path
-        and not any(pat in p.stem.lower() for pat in _SKIP_PATTERNS)
-        and "_ref" not in p.stem.lower()
-    ])
-    return files
+    files = []
+    for p in folder.iterdir():
+        if p.is_file() and p.suffix.lower() in extensions:
+            if any(pat in p.stem.lower() for pat in _SKIP_PATTERNS) or "_ref" in p.stem.lower():
+                continue
+            files.append(p)
+            
+    v_files = expand_virtual_files(files)
+    # Exclude the reference file itself
+    return [vf for vf in v_files if vf != str(reference_file)]
 
 
 def select_anchor_file(moving_images: List[str]) -> str:

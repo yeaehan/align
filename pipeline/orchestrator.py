@@ -230,17 +230,25 @@ class AlignmentPipeline:
         return result
 
     def run(self):
-        logger.info("Starting 2D Alignment Pipeline...")
-        ref_path = Path(self.config.reference_file)
+        logger.info("=== 🚀 NEXT-GEN 4i v4.1 (Optimized) ===")
+        
+        ref_file_str = self.config.reference_file
+        if "::" in ref_file_str:
+            ref_real_path, ref_ch = ref_file_str.split("::")
+            ref_path = Path(ref_real_path)
+            ref_name = f"{ref_path.stem}_{ref_ch}.tif"
+        else:
+            ref_path = Path(ref_file_str)
+            ref_name = ref_path.name
         
         if not ref_path.exists():
             logger.error(f"Reference file not found: {ref_path}")
             return
 
         # 1. Load and prepare reference image
-        logger.info(f"Loading reference: {ref_path.name}")
+        logger.info(f"Loading reference: {ref_name}")
         logger.info("Reading reference image (Network I/O)...")
-        ref_img = read_2d_as_float(str(ref_path))
+        ref_img = read_2d_as_float(ref_file_str)
         
         logger.info("Creating reference tissue mask...")
         ref_mask = TissueProcessor.create_tissue_mask(ref_img, self.config.tissue_mask_percentile)
@@ -250,7 +258,7 @@ class AlignmentPipeline:
         if hasattr(self.config, 'moving_files') and self.config.moving_files is not None:
             moving_files = self.config.moving_files
         else:
-            moving_files = discover_moving_files(ref_path)
+            moving_files = discover_moving_files(ref_file_str)
         logger.info(f"Found {len(moving_files)} moving files to align.")
         
         # Sort files to ensure anchor channels (ch00) are processed first
@@ -267,20 +275,27 @@ class AlignmentPipeline:
             match = re.search(r'[_\\-]ch\d+', filename, re.IGNORECASE)
             return filename[:match.start()] if match else filename
             
-        ref_group_key = get_group_key(ref_path.name)
+        ref_group_key = get_group_key(ref_name)
         transform_cache = {}
 
         # 3. Align each file to the reference
         for mov_file in moving_files:
-            mov_path = Path(mov_file)
-            logger.info(f"--- Aligning {mov_path.name} ---")
+            if "::" in mov_file:
+                mov_real_path, mov_ch = mov_file.split("::")
+                mov_path = Path(mov_real_path)
+                mov_name = f"{mov_path.stem}_{mov_ch}.tif"
+            else:
+                mov_path = Path(mov_file)
+                mov_name = mov_path.name
+                
+            logger.info(f"--- Aligning {mov_name} ---")
             log_hardware_usage("Pre-Registration")
             
-            group_key = get_group_key(mov_path.name)
-            is_anchor = any(p in mov_path.name.lower() for p in self.config.dapi_patterns)
+            group_key = get_group_key(mov_name)
+            is_anchor = any(p in mov_name.lower() for p in self.config.dapi_patterns)
             
             if group_key == ref_group_key:
-                logger.info("File belongs to the reference round. Bypassing registration.")
+                logger.info("🎯 Reference round - copying")
                 transform = identity()
                 skip_registration = True
             elif is_anchor or group_key not in transform_cache:
@@ -291,7 +306,7 @@ class AlignmentPipeline:
                 skip_registration = True
             
             logger.info("Reading moving image (Network I/O)...")
-            mov_img = read_2d_as_float(str(mov_path))
+            mov_img = read_2d_as_float(mov_file)
             
             if not skip_registration:
                 logger.info("Creating moving tissue mask...")
@@ -374,10 +389,10 @@ class AlignmentPipeline:
 
             # Output Generation
             logger.info("💾 Saving...")
-            save_tiff(aligned_img, str(out_dir / f"aligned_{mov_path.name}"))
+            save_tiff(aligned_img, str(out_dir / f"aligned_{mov_name}"))
             
             if not skip_registration:
-                save_debug_overlay(ref_img, aligned_img, str(out_dir / f"qc_{mov_path.name}"))
+                save_debug_overlay(ref_img, aligned_img, str(out_dir / f"qc_{mov_name}"))
                 
             # Force Garbage Collection to prevent VRAM accumulation
             del mov_img, aligned_img
@@ -388,4 +403,4 @@ class AlignmentPipeline:
             clear_gpu_memory()
             logger.info("🗑️  Cleaned up memory")
             
-        logger.info("Pipeline completed successfully!")
+        logger.info("\n✅ COMPLETED pipeline")
