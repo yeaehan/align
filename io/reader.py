@@ -42,8 +42,16 @@ def _to_float32(img: np.ndarray) -> np.ndarray:
         return img.astype(np.float32) / 65535.0
     elif img.dtype == np.uint8:
         return img.astype(np.float32) / 255.0
+    elif np.issubdtype(img.dtype, np.integer):
+        # Handle Pillow loading 16-bit TIFFs/LIFs as int32
+        if img.max() > 255:
+            return img.astype(np.float32) / 65535.0
+        return img.astype(np.float32) / 255.0
     else:
-        return img.astype(np.float32)
+        out = img.astype(np.float32)
+        if out.max() > 1.0:
+            return out / 65535.0
+        return out
 
 
 # ============================================================================
