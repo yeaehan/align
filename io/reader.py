@@ -403,7 +403,7 @@ def select_anchor_file(moving_images: List[str]) -> str:
 
 def find_reference_file(
     folder: Path,
-    extensions: tuple = _TIFF_EXTENSIONS,
+    extensions: tuple = _IMAGE_EXTENSIONS,
 ) -> Tuple[Optional[Path], Optional[str]]:
     """
     Find the reference z-stack file in a folder.
