@@ -126,7 +126,7 @@ def main():
                 ref_file = None
                 for vf in virtual_files:
                     # Use the virtual filename for matching
-                    vf_name = vf.split("\\")[-1].split("/")[-1]
+                    vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
                     if ref_channel in vf_name.lower():
                         ref_file = vf
                         break
@@ -135,7 +135,7 @@ def main():
                     logger.warning(f"No reference matching '{args.ref}' found for batch '{batch_name}'. Skipping.")
                     continue
                     
-                moving_files = [vf for vf in virtual_files if vf != ref_file]
+                moving_files = virtual_files
                 config = RegistrationConfig(
                     input_folder=str(b_dir),
                     output_folder=str(out_dir),
@@ -202,7 +202,7 @@ def main():
     ref_channel = args.ref.lower()
     reference_file = None
     for vf in virtual_files:
-        vf_name = vf.split("\\")[-1].split("/")[-1]
+        vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
         if ref_channel in vf_name.lower():
             reference_file = vf
             break
@@ -215,7 +215,7 @@ def main():
     printable_ref = reference_file.split("\\")[-1].split("/")[-1]
     logger.info(f"Using reference file: {printable_ref}")
     
-    moving_files = [vf for vf in virtual_files if vf != reference_file]
+    moving_files = virtual_files
     
     # 2. Instantiate the dataclass with command-line arguments
     config = RegistrationConfig(

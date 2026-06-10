@@ -361,8 +361,7 @@ def discover_moving_files(
             files.append(p)
             
     v_files = expand_virtual_files(files)
-    # Exclude the reference file itself
-    return [vf for vf in v_files if vf != str(reference_file)]
+    return v_files
 
 
 def select_anchor_file(moving_images: List[str]) -> str:
