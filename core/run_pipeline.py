@@ -126,7 +126,7 @@ def main():
                 ref_file = None
                 for vf in virtual_files:
                     # Use the virtual filename for matching
-                    vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
+                    vf_name = vf.split("\\")[-1].split("/")[-1]
                     if ref_channel in vf_name.lower():
                         ref_file = vf
                         break
@@ -202,7 +202,7 @@ def main():
     ref_channel = args.ref.lower()
     reference_file = None
     for vf in virtual_files:
-        vf_name = vf.split("::")[0].split("\\")[-1].split("/")[-1] if "::" in vf else Path(vf).name
+        vf_name = vf.split("\\")[-1].split("/")[-1]
         if ref_channel in vf_name.lower():
             reference_file = vf
             break
