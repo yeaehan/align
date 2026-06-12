@@ -20,7 +20,6 @@ apply_clahe
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -71,10 +70,6 @@ def apply_clahe(
         tileGridSize=tile_grid_size,
     )
     return clahe.apply(img_u8)
-
-
-def apply_clahe_u8(img_u8: np.ndarray) -> np.ndarray:
-    return apply_clahe(img_u8, clip_limit=3.0, tile_grid_size=(8, 8))
 
 
 # ============================================================================

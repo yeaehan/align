@@ -42,12 +42,12 @@ import numpy as np
 from align.config import ZStackConfig
 from align.core.tissue import (
     TissueProcessor,
+    center_on_canvas,
     normalize_to_uint8,
     resize_image,
     resize_to_shape,
 )
 from align.core.preprocessing import apply_clahe
-from align.io.reader import read_2d_as_float
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +296,8 @@ def build_refine_images(
         max(ref_refine.shape[1], mov_roi_refine.shape[1]),
     )
 
-    ref_canvas, ref_offset = _center_on_canvas(ref_refine, canvas_shape)
-    mov_canvas, mov_offset = _center_on_canvas(mov_roi_refine, canvas_shape)
+    ref_canvas, ref_offset = center_on_canvas(ref_refine, canvas_shape)
+    mov_canvas, mov_offset = center_on_canvas(mov_roi_refine, canvas_shape)
 
     refine_meta = {
         "refine_scale":       float(refine_scale),
@@ -314,21 +314,6 @@ def build_refine_images(
     )
 
     return ref_canvas.astype(np.float32), mov_canvas.astype(np.float32), refine_meta
-
-
-def _center_on_canvas(
-    img: np.ndarray,
-    canvas_shape: Tuple[int, int],
-) -> Tuple[np.ndarray, Tuple[int, int]]:
-    """Place img in the center of a zero-padded canvas."""
-    canvas_h, canvas_w = canvas_shape
-    h, w = img.shape
-    top  = (canvas_h - h) // 2
-    left = (canvas_w - w) // 2
-
-    canvas = np.zeros((canvas_h, canvas_w), dtype=np.float32)
-    canvas[top:top + h, left:left + w] = img.astype(np.float32)
-    return canvas, (top, left)
 
 
 # ============================================================================

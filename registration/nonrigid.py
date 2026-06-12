@@ -20,7 +20,7 @@ displacements or difficult tissue.
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -33,9 +33,10 @@ from align.core.tissue import (
     resize_image,
 )
 from align.core.preprocessing import apply_clahe
-from align.core.transforms import warp_affine
 
 logger = logging.getLogger(__name__)
+
+FlowStep = Tuple[np.ndarray, float]
 
 # GPU detection
 try:
@@ -143,7 +144,7 @@ class OpticalFlowRegistrar:
         mov_rigid: np.ndarray,
         ref_mask: np.ndarray,
         mov_mask: np.ndarray,
-    ) -> Tuple[np.ndarray, float, float]:
+    ) -> Tuple[np.ndarray, float, float, List[FlowStep]]:
         """
         Run optical flow refinement across pyramid levels.
 
@@ -156,10 +157,11 @@ class OpticalFlowRegistrar:
 
         Returns
         -------
-        (warped_image, initial_ncc, final_ncc)
+        (warped_image, initial_ncc, final_ncc, flow_steps)
             warped_image : float32 image after optical flow correction
             initial_ncc  : NCC before optical flow (after rigid)
             final_ncc    : NCC after optical flow
+            flow_steps   : accepted low-resolution flow fields and their scales
         """
         ref = _as_2d(ref, "ref").astype(np.float32)
         mov_rigid = _as_2d(mov_rigid, "mov_rigid").astype(np.float32)
@@ -186,15 +188,40 @@ class OpticalFlowRegistrar:
         current_mov  = mov_rigid.copy()
         current_ncc  = baseline_ncc
         best_ncc     = baseline_ncc
+        flow_steps: List[FlowStep] = []
 
         for scale_factor in self.pyramid_levels:
             logger.debug(f"Optical flow at scale {scale_factor}")
-            current_mov, current_ncc = self._flow_at_scale(
+            current_mov, current_ncc, scale_steps = self._flow_at_scale(
                 ref, current_mov, ref_mask, mov_mask, scale_factor
             )
+            flow_steps.extend(scale_steps)
             best_ncc = max(best_ncc, current_ncc)
 
-        return current_mov, baseline_ncc, best_ncc
+        return current_mov, baseline_ncc, best_ncc, flow_steps
+
+    def apply_flow_steps(
+        self,
+        img: np.ndarray,
+        flow_steps: List[FlowStep],
+    ) -> np.ndarray:
+        """Apply accepted pyramid-resolution flow steps to a full-size image."""
+        warped = _as_2d(img, "img").astype(np.float32)
+        h, w = warped.shape
+
+        for flow, scale_factor in flow_steps:
+            flow_full_x = (
+                cv2.resize(flow[..., 0], (w, h), interpolation=cv2.INTER_LINEAR)
+                / scale_factor
+            )
+            flow_full_y = (
+                cv2.resize(flow[..., 1], (w, h), interpolation=cv2.INTER_LINEAR)
+                / scale_factor
+            )
+            flow_full = np.stack([flow_full_x, flow_full_y], axis=-1)
+            warped = apply_flow(warped, flow_full, self.use_gpu, self.gpu_id)
+
+        return warped
 
     def _flow_at_scale(
         self,
@@ -203,7 +230,7 @@ class OpticalFlowRegistrar:
         ref_mask: np.ndarray,
         mov_mask: np.ndarray,
         scale_factor: float,
-    ) -> Tuple[np.ndarray, float]:
+    ) -> Tuple[np.ndarray, float, List[FlowStep]]:
         """Run multi-pass optical flow at one pyramid level."""
         ref_s = resize_image(ref, scale_factor, is_mask=False)
         mov_s = resize_image(mov, scale_factor, is_mask=False)
@@ -224,6 +251,7 @@ class OpticalFlowRegistrar:
 
         current_s  = mov_s.copy()
         current_ncc = _ncc(current_s)
+        accepted_steps: List[FlowStep] = []
         logger.info(f"    Baseline: {current_ncc:.4f}")
 
         n_passes = 3 if self.enable_pass3 else 2
@@ -236,15 +264,15 @@ class OpticalFlowRegistrar:
             logger.debug(f"  Pass {pass_idx}: NCC {current_ncc:.4f} → {new_ncc:.4f}")
 
             if new_ncc > current_ncc:
-                # upscale the flow field to full resolution and apply
-                flow_full_x = cv2.resize(flow[..., 0], (mov.shape[1], mov.shape[0])) / scale_factor
-                flow_full_y = cv2.resize(flow[..., 1], (mov.shape[1], mov.shape[0])) / scale_factor
-                flow_full   = np.stack([flow_full_x, flow_full_y], axis=-1)
-                mov         = apply_flow(mov, flow_full, self.use_gpu, self.gpu_id)
+                accepted_steps.append((flow.copy(), float(scale_factor)))
+                mov = self.apply_flow_steps(
+                    mov,
+                    [(flow, float(scale_factor))],
+                )
                 current_s   = warped_s
                 current_ncc = new_ncc
             else:
                 logger.debug(f"  Pass {pass_idx} did not improve NCC, stopping")
                 break
 
-        return mov, current_ncc
+        return mov, current_ncc, accepted_steps

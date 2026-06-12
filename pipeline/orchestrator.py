@@ -43,39 +43,6 @@ def log_hardware_usage(step_name="Hardware Status"):
     except Exception:
         pass  # nvidia-smi not found or failed
 
-# --- MASSIVE IMAGE MEMORY FIX ---
-# Standard OpenCV has a hard limit of 2.14GB (2^31 - 1 bytes) for a single matrix. 
-# cv2.Laplacian creates a CV_32F matrix, which crashes if width * height > ~530 million pixels.
-# This patches the TissueProcessor to compute weight maps at a lower scale for massive images.
-_original_create_weight_map = TissueProcessor.create_weight_map
-
-def _tiled_create_weight_map(img: np.ndarray, overlap: np.ndarray) -> np.ndarray:
-    h, w = img.shape
-    if h < 30000 and w < 30000 and (h * w) < 150_000_000:
-        return _original_create_weight_map(img, overlap)
-    
-    logger.info(f"Image too large for OpenCV ({w}x{h}), computing weight map in tiles...")
-    result = np.zeros_like(img, dtype=np.float32)
-    tile_size = 10000
-    
-    for y0 in range(0, h, tile_size):
-        y1 = min(y0 + tile_size, h)
-        for x0 in range(0, w, tile_size):
-            x1 = min(x0 + tile_size, w)
-            
-            py0, py1 = max(0, y0 - 5), min(h, y1 + 5)
-            px0, px1 = max(0, x0 - 5), min(w, x1 + 5)
-            
-            tile_wmap = _original_create_weight_map(img[py0:py1, px0:px1], overlap[py0:py1, px0:px1])
-            
-            cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
-            cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
-            result[y0:y1, x0:x1] = tile_wmap[cy0:cy1, cx0:cx1]
-            
-    return result
-
-TissueProcessor.create_weight_map = staticmethod(_tiled_create_weight_map)
-
 # --- GPU MEMORY CLEARING ---
 def clear_gpu_memory():
     try:
@@ -88,6 +55,8 @@ def clear_gpu_memory():
 class AlignmentPipeline:
     def __init__(self, config: RegistrationConfig):
         self.config = config
+        cv2.setUseOptimized(True)
+        cv2.setNumThreads(max(1, config.n_workers))
         self.rigid_registrar = RigidRegistrar(
             pyramid_levels=config.pyramid_levels,
             max_features=config.max_features
@@ -108,6 +77,7 @@ class AlignmentPipeline:
         transform: np.ndarray,
         output_shape: tuple,
         tile_size: int = 25000,
+        is_mask: bool = False,
     ) -> np.ndarray:
         """Warp image in destination tiles to avoid OpenCV's 32767-pixel limit."""
         h_out, w_out = output_shape
@@ -120,7 +90,7 @@ class AlignmentPipeline:
         # If both source and output fit, use direct warp
         if (h_src < max_cv_dim and w_src < max_cv_dim and
             h_out < max_cv_dim and w_out < max_cv_dim):
-            return warp_affine(mov_img, transform, (h_out, w_out), is_mask=False)
+            return warp_affine(mov_img, transform, (h_out, w_out), is_mask=is_mask)
         
         # Initialize output
         result = np.zeros(output_shape, dtype=np.float32)
@@ -181,7 +151,7 @@ class AlignmentPipeline:
                         src_patch,
                         tile_transform,
                         (tile_h, tile_w),
-                        is_mask=False,
+                        is_mask=is_mask,
                     )
                 except cv2.error as e:
                     logger.warning(f"Warp failed for output tile ({out_y0}:{out_y1}, {out_x0}:{out_x1}): {e}")
@@ -193,40 +163,6 @@ class AlignmentPipeline:
 
         logger.debug(f"Tiled warp wrote {tile_count} tiles, skipped {skipped_count} tiles")
         
-        return result
-
-    def _preprocess_large_image(self, img: np.ndarray) -> np.ndarray:
-        h, w = img.shape
-        # If smaller than ~200MP, run normally
-        if h * w < 200_000_000:
-            return preprocess_dapi(img, tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
-        
-        logger.info(f"   🧱 Image is massive ({w}x{h}). Preprocessing in tiles to prevent GPU swap/freeze...")
-        result = np.zeros_like(img, dtype=np.float32)
-        tile_size = 8192
-        margin = self.config.preprocessing_tophat_radius + 20
-        
-        y_steps = list(range(0, h, tile_size))
-        x_steps = list(range(0, w, tile_size))
-        total_tiles = len(y_steps) * len(x_steps)
-        
-        tile_idx = 1
-        for y0 in y_steps:
-            y1 = min(y0 + tile_size, h)
-            for x0 in x_steps:
-                x1 = min(x0 + tile_size, w)
-                
-                logger.info(f"      ⚙️ Processing tile {tile_idx}/{total_tiles} [{y0}:{y1}, {x0}:{x1}]...")
-                
-                py0, py1 = max(0, y0 - margin), min(h, y1 + margin)
-                px0, px1 = max(0, x0 - margin), min(w, x1 + margin)
-                
-                tile_prep = preprocess_dapi(img[py0:py1, px0:px1], tophat_radius=self.config.preprocessing_tophat_radius, use_gpu=self.config.use_gpu)
-                
-                cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
-                cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
-                result[y0:y1, x0:x1] = tile_prep[cy0:cy1, cx0:cx1]
-                tile_idx += 1
         return result
 
     def run(self):
@@ -276,7 +212,7 @@ class AlignmentPipeline:
             return filename[:match.start()] if match else filename
             
         ref_group_key = get_group_key(ref_name)
-        transform_cache = {}
+        round_transform_cache = {}
 
         # 3. Align each file to the reference
         for mov_file in moving_files:
@@ -297,12 +233,16 @@ class AlignmentPipeline:
             if group_key == ref_group_key:
                 logger.info("🎯 Reference round - copying")
                 transform = identity()
+                flow_steps = []
                 skip_registration = True
-            elif is_anchor or group_key not in transform_cache:
+            elif is_anchor or group_key not in round_transform_cache:
+                flow_steps = []
                 skip_registration = False
             else:
-                logger.info(f"Using cached rigid transform for round: {group_key}")
-                transform = transform_cache[group_key]
+                logger.info(f"Using cached DAPI transforms for round: {group_key}")
+                cached_transforms = round_transform_cache[group_key]
+                transform = cached_transforms["affine"]
+                flow_steps = cached_transforms["flow_steps"]
                 skip_registration = True
             
             logger.info("Reading moving image (Network I/O)...")
@@ -350,8 +290,6 @@ class AlignmentPipeline:
                     transform, rigid_ncc, method = self.rigid_registrar.register(ref_prep, mov_prep, ref_mask, mov_mask)
                 log_hardware_usage("Post-Rigid Registration")
                 logger.info(f"Rigid alignment complete (Method: {method}, NCC: {rigid_ncc:.4f})")
-                
-                transform_cache[group_key] = transform
             
             # --- FIXED: UNIFORM CANVAS SIZES ---
             # Output everything to the exact shape of the reference image
@@ -363,10 +301,12 @@ class AlignmentPipeline:
             aligned_img = self._warp_tiled(mov_img, transform, (h_ref, w_ref))
 
             # Non-Rigid Registration (Optical flow)
-            if self.config.enable_nonrigid and not skip_registration:
+            if self.config.enable_nonrigid and not skip_registration and is_anchor:
                 logger.info("Running Non-Rigid Registration (Optical Flow)...")
                 # For optical flow, also need to warp the mask
-                mov_mask_w = self._warp_tiled(mov_mask.astype(np.float32), transform, (h_ref, w_ref))
+                mov_mask_w = self._warp_tiled(
+                    mov_mask, transform, (h_ref, w_ref), is_mask=True
+                )
                 mov_mask_w = np.squeeze(mov_mask_w)
                 mov_mask_w = (mov_mask_w > 0.5).astype(bool)  # binarize
                 
@@ -379,16 +319,38 @@ class AlignmentPipeline:
                     f"Non-rigid shapes: ref={ref_raw.shape}, aligned={aligned_img.shape}, "
                     f"ref_mask={ref_mask_sq.shape}, mov_mask={mov_mask_w.shape}"
                 )
-                aligned_img, base_ncc, final_ncc = self.nonrigid_registrar.refine(
+                aligned_img, base_ncc, final_ncc, flow_steps = self.nonrigid_registrar.refine(
                     ref_raw, aligned_img, ref_mask_sq, mov_mask_w
                 )
                 logger.info(f"Non-rigid alignment complete (NCC: {base_ncc:.4f} -> {final_ncc:.4f})")
                 log_hardware_usage("Post-Optical Flow")
-            elif self.config.enable_nonrigid and skip_registration and group_key != ref_group_key:
-                logger.warning("Skipping Optical Flow for non-anchor channel (Requires saving flow field). Applying rigid warp only.")
+            elif (
+                self.config.enable_nonrigid
+                and skip_registration
+                and group_key != ref_group_key
+                and flow_steps
+            ):
+                logger.info(
+                    f"Applying {len(flow_steps)} cached DAPI optical-flow step(s) "
+                    f"to channel: {mov_name}"
+                )
+                aligned_img = self.nonrigid_registrar.apply_flow_steps(
+                    aligned_img,
+                    flow_steps,
+                )
+
+            if not skip_registration:
+                round_transform_cache[group_key] = {
+                    "affine": transform,
+                    "flow_steps": flow_steps,
+                }
 
             # Output Generation
             logger.info("💾 Saving...")
+
+            # Readers normalize to [0, 1]; interpolation can overshoot slightly.
+            aligned_img = np.clip(aligned_img, 0.0, 1.0).astype(np.float32)
+
             save_tiff(aligned_img, str(out_dir / f"aligned_{mov_name}"))
             
             if not skip_registration:

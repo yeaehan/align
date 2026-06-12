@@ -19,8 +19,7 @@ The full chain is reconstructed through matrix composition of the inverse transf
 
 from __future__ import annotations
 
-import logging
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Any, Dict
 
 import numpy as np
 
@@ -30,9 +29,6 @@ from align.core.transforms import (
     scale_3x3,
     warp_affine,
 )
-
-logger = logging.getLogger(__name__)
-
 
 # ============================================================================
 # TRANSFORM COMPOSITION & CONVERSION

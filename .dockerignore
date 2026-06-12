@@ -1,0 +1,11 @@
+.git
+.gitignore
+.nextflow
+work
+results
+__pycache__
+*.py[cod]
+*.ipynb
+*.tif
+*.tiff
+*.lif

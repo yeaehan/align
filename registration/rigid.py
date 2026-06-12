@@ -36,7 +36,6 @@ import cv2
 import numpy as np
 from skimage.registration import phase_cross_correlation
 
-from align.config import RegistrationConfig, ZStackConfig
 from align.core.tissue import (
     TissueProcessor,
     compute_weighted_ncc,
@@ -45,21 +44,15 @@ from align.core.tissue import (
     score_transform,
 )
 from align.core.transforms import (
-    compose,
     compose_affine,
     identity,
     scale_affine_translation,
     scale_translation_only,
-    upscale_to_full,
     warp_affine,
 )
 from align.core.preprocessing import apply_clahe
 
 logger = logging.getLogger(__name__)
-
-# type alias — either config type works for rigid registration
-_Config = RegistrationConfig | ZStackConfig
-
 
 # ============================================================================
 # PHASE CORRELATION
@@ -108,6 +101,7 @@ def register_ecc(
     ref_u8: np.ndarray,
     mov_u8: np.ndarray,
     ref_mask: np.ndarray,
+    mov_mask: np.ndarray,
     init_transform: np.ndarray,
     max_iterations: int = 100,
     epsilon: float = 1e-5,
@@ -122,7 +116,8 @@ def register_ecc(
     Parameters
     ----------
     ref, mov        : 2D float images
-    ref_mask        : binary mask used to limit ECC to tissue regions
+    ref_mask        : binary reference mask used to limit ECC to tissue regions
+    mov_mask        : binary moving mask used when scoring the result
     init_transform  : 2×3 initial transform (from phase correlation)
     max_iterations  : ECC iteration limit
     epsilon         : convergence threshold
@@ -151,8 +146,9 @@ def register_ecc(
             input_mask,
             1,
         )
-        ncc = score_transform(ref, mov, ref_mask,
-                              np.ones_like(ref_mask), warp_ecc.astype(np.float32))
+        ncc = score_transform(
+            ref, mov, ref_mask, mov_mask, warp_ecc.astype(np.float32)
+        )
         return warp_ecc.astype(np.float32), ncc
     except cv2.error as e:
         logger.debug(f"ECC failed: {e}")
@@ -211,13 +207,13 @@ class FeatureBasedRegistration:
         ref_mask_u8 = ref_mask.astype(np.uint8) * 255
         mov_mask_u8 = mov_mask.astype(np.uint8) * 255
 
-        # SIFT with ORB fallback (ORB is available in all OpenCV builds)
-        try:
-            detector = cv2.SIFT_create(nfeatures=self.max_features)
-        except Exception:
-            detector = cv2.ORB_create(nfeatures=min(self.max_features, 20000))
-
         def _detect(img, mask):
+            # Each worker gets its own detector; OpenCV detector instances are
+            # not guaranteed to be safe for concurrent detectAndCompute calls.
+            try:
+                detector = cv2.SIFT_create(nfeatures=self.max_features)
+            except Exception:
+                detector = cv2.ORB_create(nfeatures=min(self.max_features, 20000))
             return detector.detectAndCompute(img, mask)
 
         with ThreadPoolExecutor(max_workers=2) as ex:
@@ -372,7 +368,13 @@ class RigidRegistrar:
             # --- ECC (initialized with best so far) ---
             try:
                 T_ecc, ecc_ncc = register_ecc(
-                    ref_s, mov_w, ref_u8, mov_u8, ref_mask_s, identity()
+                    ref_s,
+                    mov_w,
+                    ref_u8,
+                    mov_u8,
+                    ref_mask_s,
+                    mov_mask_w,
+                    best_local,
                 )
                 if ecc_ncc > best_local_ncc:
                     best_local, best_local_ncc, best_local_method = T_ecc, ecc_ncc, "ECC"

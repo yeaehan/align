@@ -5,6 +5,8 @@ Matrix and affine transformation utilities for image alignment.
 """
 
 import logging
+from typing import Optional
+
 import cv2
 import numpy as np
 
@@ -13,24 +15,6 @@ logger = logging.getLogger(__name__)
 def identity() -> np.ndarray:
     """Return a 2x3 identity affine matrix."""
     return np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
-
-def compose(T1: np.ndarray, T2: np.ndarray) -> np.ndarray:
-    """Compose two 2x3 affine transformation matrices.
-    
-    Computes T1 @ T2, which applies T2 first, then T1.
-    """
-    M1 = np.vstack([T1, [0.0, 0.0, 1.0]])
-    M2 = np.vstack([T2, [0.0, 0.0, 1.0]])
-    M3 = M1 @ M2
-    result = M3[:2, :].astype(np.float32)
-    
-    # Validate result
-    if not np.all(np.isfinite(result)):
-        logger.error(f"Compose produced invalid matrix. T1: {T1}, T2: {T2}")
-        logger.error(f"Result: {result}")
-        raise ValueError(f"Transform composition resulted in NaN or Inf values")
-    
-    return result
 
 def scale_translation_only(T: np.ndarray, scale: float) -> np.ndarray:
     """Scale the translation components (column 2) of a 2x3 affine matrix."""
@@ -44,11 +28,13 @@ def scale_affine_translation(T: np.ndarray, ratio: float) -> np.ndarray:
     T2[1, 2] *= ratio
     return T2
 
-def upscale_to_full(T: np.ndarray, scale: float) -> np.ndarray:
-    """Upscale an affine transform from a pyramid level back to full resolution."""
-    return scale_translation_only(T, 1.0 / scale)
-
-def warp_affine(img: np.ndarray, T: np.ndarray, out_shape: tuple, is_mask: bool = False) -> np.ndarray:
+def warp_affine(
+    img: np.ndarray,
+    T: np.ndarray,
+    out_shape: tuple,
+    is_mask: bool = False,
+    interpolation: Optional[int] = None,
+) -> np.ndarray:
     """Apply affine warp to a 2D image.
     
     Parameters
@@ -61,6 +47,9 @@ def warp_affine(img: np.ndarray, T: np.ndarray, out_shape: tuple, is_mask: bool 
         (height, width) or (height, width, channels) of output
     is_mask : bool
         If True, uses nearest neighbor interpolation
+    interpolation : int, optional
+        OpenCV interpolation mode. By default, masks use nearest-neighbor,
+        enlargements use Lanczos4, and other image warps use cubic sampling.
         
     Returns
     -------
@@ -87,7 +76,15 @@ def warp_affine(img: np.ndarray, T: np.ndarray, out_shape: tuple, is_mask: bool 
         logger.warning(f"Transform translation is very large: T[0,2]={T[0,2]}, T[1,2]={T[1,2]}")
         # This might still work, but it's suspicious
     
-    interp = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+    if interpolation is None:
+        if is_mask:
+            interp = cv2.INTER_NEAREST
+        else:
+            spatial_transform = T[:, :2].astype(np.float64)
+            max_scale = float(np.linalg.svd(spatial_transform, compute_uv=False).max())
+            interp = cv2.INTER_LANCZOS4 if max_scale > 1.05 else cv2.INTER_CUBIC
+    else:
+        interp = interpolation
     if is_mask:
         res = cv2.warpAffine(img.astype(np.uint8), T, (w, h), flags=interp)
         return res.astype(bool)

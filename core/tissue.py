@@ -18,19 +18,12 @@ Why weight by tissue?
     Laplacian contrast inside the tissue mask focuses the metric on the
     structured signal that actually matters for alignment.
 
-Cache note
-----------
-TissueProcessor._mask_cache is a class-level dict that persists across
-pipeline runs within a session. This is intentional for performance (tissue
-masking is called many times on the same images at different scales), but
-call TissueProcessor.clear_cache() between unrelated batches to avoid
-stale entries.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple
+from typing import Tuple
 
 import cv2
 import numpy as np
@@ -163,13 +156,6 @@ class TissueProcessor:
     focusing registration on information-dense regions.
     """
 
-    _mask_cache: Dict[str, np.ndarray] = {}
-
-    @classmethod
-    def clear_cache(cls) -> None:
-        """Clear the mask cache. Call between unrelated batches."""
-        cls._mask_cache.clear()
-
     @staticmethod
     def create_tissue_mask(
         img: np.ndarray,
@@ -187,11 +173,6 @@ class TissueProcessor:
         -------
         Boolean mask, same shape as img.
         """
-        # cache key: shape + percentile + mean (fast proxy for image identity)
-        cache_key = f"{img.shape}_{percentile}_{float(np.mean(img)):.6f}"
-        if cache_key in TissueProcessor._mask_cache:
-            return TissueProcessor._mask_cache[cache_key].copy()
-
         logger.debug("Creating tissue mask...")
         original_shape = img.shape
         max_size = 2048
@@ -239,7 +220,6 @@ class TissueProcessor:
         coverage = np.sum(mask) / mask.size
         logger.debug(f"Tissue mask coverage: {coverage:.1%}")
 
-        TissueProcessor._mask_cache[cache_key] = mask.copy()
         return mask
 
     @staticmethod
@@ -263,6 +243,38 @@ class TissueProcessor:
         -------
         float32 weight map in [0, 1], same shape as dapi_img
         """
+        h, w = dapi_img.shape
+        if h >= 30000 or w >= 30000 or h * w >= 150_000_000:
+            logger.info(f"Computing weight map in tiles for {w}x{h} image")
+            result = np.zeros_like(dapi_img, dtype=np.float32)
+            tile_size = 10000
+            margin = 5
+
+            for y0 in range(0, h, tile_size):
+                y1 = min(y0 + tile_size, h)
+                for x0 in range(0, w, tile_size):
+                    x1 = min(x0 + tile_size, w)
+                    py0, py1 = max(0, y0 - margin), min(h, y1 + margin)
+                    px0, px1 = max(0, x0 - margin), min(w, x1 + margin)
+
+                    tile_weight = TissueProcessor._create_weight_map(
+                        dapi_img[py0:py1, px0:px1],
+                        base_mask[py0:py1, px0:px1],
+                    )
+                    cy0, cy1 = y0 - py0, y0 - py0 + (y1 - y0)
+                    cx0, cx1 = x0 - px0, x0 - px0 + (x1 - x0)
+                    result[y0:y1, x0:x1] = tile_weight[cy0:cy1, cx0:cx1]
+
+            return result
+
+        return TissueProcessor._create_weight_map(dapi_img, base_mask)
+
+    @staticmethod
+    def _create_weight_map(
+        dapi_img: np.ndarray,
+        base_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Compute a weight map for an image small enough for one OpenCV call."""
         img      = np.clip(dapi_img.astype(np.float32), 0.0, 1.0)
         lap      = cv2.Laplacian(img, cv2.CV_32F, ksize=3)
         contrast = np.abs(lap)

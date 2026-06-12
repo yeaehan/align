@@ -33,14 +33,15 @@ align-pipeline \
     --ref ch00
 ```
 
-### 2. Batch Processing (2D or 3D)
-Use the `--batch` flag to auto-detect multiple samples in a directory. It will group files that share the same prefix (separated by `_`) or process nested subfolders automatically.
+### 2. Multi-Sample Processing with Nextflow
+Nextflow scans a flat input directory, groups files by sample identifier, and runs one alignment task per sample.
 
 ```bash
-align-pipeline \
-    --input_folder ../data/all_raw_samples \
-    --output_folder ../data/all_aligned_outputs \
-    --batch
+nextflow run main.nf \
+    --input ../data/all_raw_samples \
+    --output ../data/all_aligned_outputs \
+    -profile local \
+    -resume
 ```
 
 ### Optional Flags
@@ -56,9 +57,8 @@ align-pipeline \
 align-pipeline \
     --input_folder ../data/raw \
     --output_folder ../data/aligned \
-    --input_folder ./data/raw \
-    --output_folder ./data/aligned \
-    --batch \
+    --input_folder ./data/raw_sample \
+    --output_folder ./data/aligned_sample \
     --no_gpu \
     --disable_nonrigid
 ```

@@ -1,0 +1,10 @@
+{
+  "input": "/path/to/input",
+  "output": "results",
+  "bucket": null,
+  "ref": "ch00",
+  "mode": "2d",
+  "no_gpu": false,
+  "disable_nonrigid": false,
+  "cpus": 4
+}

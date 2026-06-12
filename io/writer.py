@@ -32,6 +32,7 @@ def save_tiff(
     img: np.ndarray,
     output_path: str,
     voxel_spacing_z: Optional[float] = None,
+    pixel_size_xy: Optional[float] = None,
     axes: Optional[str] = None,
 ) -> None:
     """
@@ -40,7 +41,7 @@ def save_tiff(
     Automatically:
     - Converts float [0,1] to uint16
     - Enables BigTIFF for files > 3.9 GB
-    - Adds ImageJ metadata if voxel_spacing_z is provided
+    - Adds ImageJ spatial calibration when pixel sizes are provided
     - Uses deflate compression level 1 (fast)
 
     Parameters
@@ -49,6 +50,7 @@ def save_tiff(
     output_path      : destination file path (will be created including parents)
     voxel_spacing_z  : Z voxel size in microns, written to ImageJ metadata
                        Set for z-stacks so they open correctly in Fiji/ImageJ
+    pixel_size_xy    : XY pixel size in microns
     axes             : axis string e.g. "ZYX", "YX"; inferred if not provided
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -62,13 +64,24 @@ def save_tiff(
     use_bigtiff = img_out.nbytes > 3.9e9
 
     metadata = {}
-    if voxel_spacing_z is not None:
+    if voxel_spacing_z is not None or pixel_size_xy is not None:
         if axes is None:
             axes = "ZYX" if img_out.ndim == 3 else "YX"
         metadata = {
             "axes":    axes,
-            "spacing": voxel_spacing_z,
             "unit":    "um",
+        }
+        if voxel_spacing_z is not None:
+            metadata["spacing"] = voxel_spacing_z
+
+    resolution_kwargs = {}
+    if pixel_size_xy is not None:
+        if pixel_size_xy <= 0:
+            raise ValueError("pixel_size_xy must be greater than zero")
+        pixels_per_centimeter = 10000.0 / pixel_size_xy
+        resolution_kwargs = {
+            "resolution": (pixels_per_centimeter, pixels_per_centimeter),
+            "resolutionunit": "CENTIMETER",
         }
 
     tifffile.imwrite(
@@ -79,6 +92,7 @@ def save_tiff(
         metadata=metadata if metadata else None,
         compression="deflate",
         compressionargs={"level": 1},
+        **resolution_kwargs,
     )
     logger.debug(f"Saved: {Path(output_path).name} ({img_out.nbytes / 1e9:.2f} GB)")
 

@@ -262,30 +262,6 @@ def extract_reference_plane(
     return extract_z_plane(zstack, z_plane)
 
 
-def replicate_to_zstack(
-    channel_2d: np.ndarray,
-    n_z_planes: int,
-) -> np.ndarray:
-    """
-    Replicate a 2D image across multiple Z-planes.
-    
-    Used to create a z-stack output from a single 2D aligned channel.
-    
-    Parameters
-    ----------
-    channel_2d : 2D array (H, W)
-        2D image to replicate
-    n_z_planes : int
-        Number of Z-planes to create
-    
-    Returns
-    -------
-    zstack : 3D array (Z, H, W)
-        The 2D image replicated n_z_planes times along axis 0
-    """
-    return np.stack([channel_2d] * n_z_planes, axis=0)
-
-
 # ============================================================================
 # FILE DISCOVERY
 # ============================================================================

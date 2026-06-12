@@ -371,6 +371,7 @@ class ZStackAlignmentPipeline:
                     channel_zstack,
                     str(output_path),
                     voxel_spacing_z=self.config.voxel_size_63x[2],
+                    pixel_size_xy=self.config.voxel_size_63x[0],
                     axes="ZYX",
                 )
                 logger.info(f"Saved: {output_path.name}")

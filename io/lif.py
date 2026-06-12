@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from readlif.reader import LifFile
 from align.io.reader import _to_float32
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
