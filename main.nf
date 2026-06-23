@@ -37,7 +37,7 @@ process ALIGN_IMAGES {
     export MKL_NUM_THREADS=1
     export NUMEXPR_NUM_THREADS=1
 
-    python "${projectDir}/run_alignment.py" \
+    align-pipeline \
         --input_folder . \
         --output_folder aligned \
         --ref "${params.ref}" \
